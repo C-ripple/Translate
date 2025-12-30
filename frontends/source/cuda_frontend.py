@@ -489,20 +489,20 @@ class CUDAToRIPPLETransformer:
         
         Returns the transformed source code.
         """
-        # Lexical Analysis
-        lexer = CUDALexer(cuda_source)
-        tokens = lexer.tokenize()
+        # Lexical Analysis (temporarily disabled - causes hang on complex kernels)
+        # lexer = CUDALexer(cuda_source)
+        # tokens = lexer.tokenize()
         
         # AST Parsing (Intermediate Representation)
-        builder = AIRBuilder(tokens, self.ctx)
-        try:
-            translation_unit = builder.build_translation_unit()
-            # detected_kernels = [f for f in translation_unit.functions if f.is_kernel]
-            # if detected_kernels:
-            #     # Future: Generate code from AST 'translation_unit'
-            #     pass
-        except Exception as e:
-            self.ctx.add_warning(f"AST Parsing failed, falling back to Regex: {e}")
+        # builder = AIRBuilder(tokens, self.ctx)
+        # try:
+        #     translation_unit = builder.build_translation_unit()
+        #     # detected_kernels = [f for f in translation_unit.functions if f.is_kernel]
+        #     # if detected_kernels:
+        #     #     # Future: Generate code from AST 'translation_unit'
+        #     #     pass
+        # except Exception as e:
+        #     self.ctx.add_warning(f"AST Parsing failed, falling back to Regex: {e}")
             
         # -- Legacy Regex Transformation (Current Working Path) --
         
