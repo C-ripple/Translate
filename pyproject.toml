@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cuda2ripple"
+version = "0.1.0"
+description = "Translate CUDA code to RIPPLE for Hexagon HVX and other SIMD targets"
+readme = "docs/README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "CUDA2RIPPLE Team"}
+]
+keywords = ["cuda", "ripple", "hexagon", "hvx", "simd", "compiler", "translator"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Code Generators",
+]
+dependencies = [
+    "flask>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+]
+web = [
+    "flask>=2.0.0",
+    "gunicorn>=21.0.0",
+]
+
+[project.scripts]
+cuda2ripple = "cuda2ripple.interfaces.cli.cuda2ripple:main"
+cuda2ripple-web = "cuda2ripple.interfaces.web.server:run_server"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/cuda2ripple"
+Documentation = "https://github.com/yourusername/cuda2ripple/docs"
+Repository = "https://github.com/yourusername/cuda2ripple"
+Issues = "https://github.com/yourusername/cuda2ripple/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cuda2ripple*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311"]
+include = '\.pyi?$'
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

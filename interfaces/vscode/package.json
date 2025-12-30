@@ -1,0 +1,156 @@
+{
+  "name": "cuda2ripple",
+  "displayName": "CUDA to RIPPLE Translator",
+  "description": "Translate CUDA code to RIPPLE for Hexagon HVX and other SIMD targets",
+  "version": "0.1.0",
+  "publisher": "cuda2ripple",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters",
+    "Other"
+  ],
+  "keywords": [
+    "cuda",
+    "ripple",
+    "hexagon",
+    "hvx",
+    "simd",
+    "translator"
+  ],
+  "activationEvents": [
+    "onLanguage:cuda-cpp",
+    "onLanguage:cpp",
+    "onCommand:cuda2ripple.translate",
+    "onCommand:cuda2ripple.translateFile"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cuda2ripple.translate",
+        "title": "CUDA to RIPPLE: Translate Selection",
+        "category": "CUDA to RIPPLE"
+      },
+      {
+        "command": "cuda2ripple.translateFile",
+        "title": "CUDA to RIPPLE: Translate File",
+        "category": "CUDA to RIPPLE"
+      },
+      {
+        "command": "cuda2ripple.translateToNewFile",
+        "title": "CUDA to RIPPLE: Translate to New File",
+        "category": "CUDA to RIPPLE"
+      },
+      {
+        "command": "cuda2ripple.showPreview",
+        "title": "CUDA to RIPPLE: Show Side-by-Side Preview",
+        "category": "CUDA to RIPPLE"
+      },
+      {
+        "command": "cuda2ripple.analyze",
+        "title": "CUDA to RIPPLE: Analyze CUDA Code",
+        "category": "CUDA to RIPPLE"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "cuda2ripple.translate",
+          "when": "editorHasSelection && resourceExtname =~ /\\.(cu|cuh|cuda)$/",
+          "group": "cuda2ripple"
+        },
+        {
+          "command": "cuda2ripple.translateFile",
+          "when": "resourceExtname =~ /\\.(cu|cuh|cuda)$/",
+          "group": "cuda2ripple"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "cuda2ripple.translateToNewFile",
+          "when": "resourceExtname =~ /\\.(cu|cuh|cuda)$/",
+          "group": "cuda2ripple"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "cuda2ripple.translate",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "CUDA to RIPPLE",
+      "properties": {
+        "cuda2ripple.target": {
+          "type": "string",
+          "default": "hexagon",
+          "enum": ["hexagon", "x86", "arm"],
+          "description": "Target SIMD platform"
+        },
+        "cuda2ripple.hvxWidth": {
+          "type": "number",
+          "default": 128,
+          "enum": [64, 128],
+          "description": "Hexagon HVX vector width in bytes"
+        },
+        "cuda2ripple.hvxMode": {
+          "type": "string",
+          "default": "v68",
+          "description": "Hexagon HVX instruction set version"
+        },
+        "cuda2ripple.preserveComments": {
+          "type": "boolean",
+          "default": true,
+          "description": "Preserve comments in translated code"
+        },
+        "cuda2ripple.showWarnings": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show translation warnings"
+        },
+        "cuda2ripple.translationMode": {
+          "type": "string",
+          "default": "source",
+          "enum": ["source", "ir"],
+          "description": "Translation mode (source-level or IR-level)"
+        },
+        "cuda2ripple.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:5000",
+          "description": "URL of the cuda2ripple web server (for remote translation)"
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "ripple-c",
+        "aliases": ["RIPPLE C", "ripple"],
+        "extensions": [".ripple.c", ".ripple.h"],
+        "configuration": "./language-configuration.json"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.50.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.0"
+  }
+}
