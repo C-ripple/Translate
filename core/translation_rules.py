@@ -385,6 +385,45 @@ class ShuffleSyncRule(TranslationRule):
         return re.sub(self.PATTERN, replace, cuda_code)
 
 
+class WarpReductionRule(TranslationRule):
+    """
+    Detects and optimizes standard Warp Reduction loops.
+    
+    Pattern:
+      for (int offset = warpSize/2; offset > 0; offset /= 2)
+          val += __shfl_down_sync(..., val, offset);
+          
+    Replacement:
+      val = ripple_reduceadd(val);
+    """
+    
+    # Regex handles variations in spacing and variable names
+    # Group 1: Loop variable (e.g. "offset" or "i")
+    # Group 2: Accumulator variable (e.g. "val" or "sum")
+    PATTERN = r'for\s*\(\s*int\s+(\w+)\s*=\s*warpSize\s*/\s*2\s*;\s*\1\s*>\s*0\s*;\s*\1\s*/=\s*2\s*\)\s*\{\s*(\w+)\s*\+=\s*__shfl_down_sync\s*\([^,]+,\s*\2\s*,\s*\1\s*(?:,[^)]+)?\);\s*\}'
+    
+    def __init__(self):
+        super().__init__(
+            name="warp_reduction_optimization",
+            description="Optimize warp reduction loop to ripple_reduceadd",
+            cuda_pattern=self.PATTERN,
+            priority=85  # Higher priority than generic shuffle rules
+        )
+    
+    def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
+        def replace(match):
+            loop_var = match.group(1)
+            accum_var = match.group(2)
+            
+            ctx.add_warning(f"Optimized Warp Reduction loop for '{accum_var}' to 'ripple_reduceadd'")
+            
+            return f"""/* CUDA Warp Reduction Loop -> RIPPLE Intrinsic */
+    {accum_var} = ripple_reduceadd({accum_var});"""
+        
+        # Use DOTALL to match across newlines if user formatted code vertically
+        return re.sub(self.PATTERN, replace, cuda_code, flags=re.DOTALL)
+
+
 # =============================================================================
 # Atomic Operation Translation Rules
 # =============================================================================
@@ -593,6 +632,16 @@ class MathFunctionRule(TranslationRule):
         '__saturatef': 'fminf(1.0f, fmaxf(0.0f,',
         'fmaf': 'fmaf',
         '__fmaf_rn': 'fmaf',
+        # Integer Intrinsics
+        '__popc': '__builtin_popcount',
+        '__popcll': '__builtin_popcountll',
+        '__clz': '__builtin_clz',
+        '__clzll': '__builtin_clzll',
+        '__ffs': '__builtin_ffs',
+        '__ffsll': '__builtin_ffsll',
+        '__brev': '__builtin_bitreverse32',
+        '__brevll': '__builtin_bitreverse64',
+        '__sad': 'ripple_sad',  # We'll define a macro for this
     }
     
     PATTERN = r'(' + '|'.join(re.escape(k) for k in MATH_MAP.keys()) + r')\s*\('
@@ -691,6 +740,7 @@ class TranslationRuleEngine:
             SyncWarpRule(),
             
             # Shuffles
+            WarpReductionRule(),
             ShuffleDownRule(),
             ShuffleUpRule(),
             ShuffleXorRule(),

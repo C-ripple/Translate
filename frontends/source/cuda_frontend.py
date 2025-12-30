@@ -593,6 +593,9 @@ class CUDAToRIPPLETransformer:
 #define ripple_atomic_min(ptr, val) do { if ((val) < *(ptr)) *(ptr) = (val); } while(0)
 #endif
 
+/* Math intrinsics */
+#define ripple_sad(x, y, z) (__builtin_abs((x) - (y)) + (z))
+
 """
         
         return header + source
