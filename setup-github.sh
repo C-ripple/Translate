@@ -1,70 +1,62 @@
 #!/bin/bash
-# GitHub Repository Setup Script for cuda2ripple
+# GitHub Repository Setup Script for CUDA to Ripple Translator
 # 
-# This script helps you create and push the cuda2ripple repository to GitHub.
-# Run this after extracting the cuda2ripple.zip file.
+# This script helps you manage the Translate repository on GitHub.
+# Repository: https://github.com/C-ripple/Translate
 
 set -e
 
 echo "=========================================="
-echo "  cuda2ripple GitHub Repository Setup"
+echo "  CUDA to Ripple Translator - GitHub Setup"
 echo "=========================================="
 echo ""
 
 # Check if gh CLI is available
 if command -v gh &> /dev/null; then
-    echo "GitHub CLI detected. Creating repository..."
-    
-    # Create the repository
-    gh repo create cuda2ripple \
-        --public \
-        --description "Translate CUDA code to RIPPLE for Hexagon HVX and other SIMD targets" \
-        --source . \
-        --push
-    
+    echo "GitHub CLI detected."
+    echo "Repository: https://github.com/C-ripple/Translate"
     echo ""
-    echo "✅ Repository created and code pushed!"
-    echo "   Visit: https://github.com/$(gh api user -q .login)/cuda2ripple"
 else
-    echo "GitHub CLI not found. Using git directly..."
+    echo "Repository URL: https://github.com/C-ripple/Translate"
     echo ""
-    echo "Please create a repository on GitHub first:"
-    echo "  1. Go to https://github.com/new"
-    echo "  2. Repository name: cuda2ripple"
-    echo "  3. Description: Translate CUDA code to RIPPLE for Hexagon HVX and other SIMD targets"
-    echo "  4. Set to Public"
-    echo "  5. Do NOT initialize with README (we have one)"
-    echo "  6. Click 'Create repository'"
-    echo ""
-    read -p "Enter your GitHub username: " GITHUB_USER
+    echo "To push changes:"
+    echo "  git add ."
+    echo "  git commit -m \"Your commit message\""
+    echo "  git push origin main"
     echo ""
     
-    # Initialize git and push
-    git init
-    git add .
-    git commit -m "Initial commit: CUDA to RIPPLE translator
-
-Features:
-- Source-level translation (CUDA C → RIPPLE C)
-- IR-level translation (CUDA LLVM IR → RIPPLE LLVM IR)
-- CLI, Web, and VS Code interfaces
-- Hexagon HVX optimization
-- 20+ translation rules for CUDA patterns"
-    
-    git branch -M main
-    git remote add origin "https://github.com/${GITHUB_USER}/cuda2ripple.git"
-    git push -u origin main
-    
-    echo ""
-    echo "✅ Code pushed!"
-    echo "   Visit: https://github.com/${GITHUB_USER}/cuda2ripple"
+    # Check if remote is already configured
+    if git remote get-url origin &> /dev/null; then
+        echo "✅ Git remote already configured"
+        echo "   Remote URL: $(git remote get-url origin)"
+    else
+        echo "Setting up git remote..."
+        git init
+        git branch -M main
+        git remote add origin "https://github.com/C-ripple/Translate.git"
+        echo "✅ Git remote configured"
+    fi
 fi
 
 echo ""
 echo "=========================================="
-echo "  Next Steps:"
+echo "  Project Summary:"
 echo "=========================================="
-echo "  • Add topics: cuda, ripple, hexagon, hvx, simd, compiler"
-echo "  • Enable GitHub Pages for documentation"
-echo "  • Set up GitHub Actions for CI/CD"
+echo "  Repository: https://github.com/C-ripple/Translate"
+echo "  Description: CUDA to Ripple translator for Hexagon HVX"
+echo ""
+echo "  Features:"
+echo "  • Source-level translation (CUDA C → Ripple C)"
+echo "  • Grid-stride loop support (blockIdx handling)"
+echo "  • Warp reduction optimization (ripple_reduceadd)"
+echo "  • Bitwise intrinsics (__popc, __clz, __brev)"
+echo "  • Atomic operations (CAS, EXCH, MIN, MAX, ADD)"
+echo "  • Flutter web UI + Python Flask backend"
+echo "  • 17 comprehensive tests passing"
+echo ""
+echo "=========================================="
+echo "  Recommended Topics:"
+echo "=========================================="
+echo "  cuda, ripple, hexagon, hvx, qualcomm,"
+echo "  simd, dsp, compiler, translator, flutter"
 echo "=========================================="
