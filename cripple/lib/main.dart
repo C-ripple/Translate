@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 
@@ -181,12 +182,32 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
             const SizedBox(height: 16),
-            Text(
-              "Ripple Output",
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    color: Theme.of(context).colorScheme.secondary,
-                    fontWeight: FontWeight.bold,
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  "Ripple Output",
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.secondary,
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+                if (_outputCode.isNotEmpty)
+                  IconButton(
+                    icon: const Icon(Icons.copy_all, size: 20),
+                    tooltip: 'Copy to clipboard',
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: _outputCode));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Ripple code copied to clipboard!'),
+                          duration: Duration(seconds: 2),
+                          backgroundColor: Color(0xFF6C63FF),
+                        ),
+                      );
+                    },
                   ),
+              ],
             ),
             const SizedBox(height: 8),
             Expanded(
