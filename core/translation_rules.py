@@ -525,6 +525,28 @@ class AtomicCASRule(TranslationRule):
         return re.sub(self.PATTERN, replace, cuda_code)
 
 
+class AtomicExchRule(TranslationRule):
+    """Translates atomicExch."""
+    
+    PATTERN = r'atomicExch\s*\(\s*([^,]+),\s*([^)]+)\)'
+    
+    def __init__(self):
+        super().__init__(
+            name="atomic_exch",
+            description="Translate atomicExch to RIPPLE",
+            cuda_pattern=self.PATTERN,
+            priority=60
+        )
+    
+    def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
+        def replace(match):
+            target = match.group(1).strip()
+            value = match.group(2).strip()
+            return f"ripple_atomic_exch({target}, {value})"
+        
+        return re.sub(self.PATTERN, replace, cuda_code)
+
+
 # =============================================================================
 # Kernel Declaration Translation Rules
 # =============================================================================
@@ -751,6 +773,7 @@ class TranslationRuleEngine:
             AtomicMaxRule(),
             AtomicMinRule(),
             AtomicCASRule(),
+            AtomicExchRule(),
             
             # Math functions
             MathFunctionRule(),
