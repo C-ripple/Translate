@@ -162,7 +162,11 @@ class GridDimRule(TranslationRule):
 
 class SharedMemoryRule(TranslationRule):
     """Translates __shared__ declarations to local arrays with VTCM hints."""
-    
+
+    # Array-form declarations only (requires trailing [...]) — scalar
+    # `__shared__ float x;` is not matched or translated by this rule.
+    # tests/test_translation.py reuses this pattern to detect leftover
+    # untranslated declarations, so it inherits the same array-only scope.
     PATTERN = r'__shared__\s+(\w+)\s+(\w+)\s*\[([^\]]*)\]'
     
     def __init__(self):
