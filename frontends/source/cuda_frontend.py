@@ -489,22 +489,29 @@ class CUDAToRIPPLETransformer:
         
         Returns the transformed source code.
         """
-        # Lexical Analysis (temporarily disabled - causes hang on complex kernels)
-        # lexer = CUDALexer(cuda_source)
-        # tokens = lexer.tokenize()
-        
-        # AST Parsing (Intermediate Representation)
-        # builder = AIRBuilder(tokens, self.ctx)
-        # try:
-        #     translation_unit = builder.build_translation_unit()
-        #     # detected_kernels = [f for f in translation_unit.functions if f.is_kernel]
-        #     # if detected_kernels:
-        #     #     # Future: Generate code from AST 'translation_unit'
-        #     #     pass
-        # except Exception as e:
-        #     self.ctx.add_warning(f"AST Parsing failed, falling back to Regex: {e}")
-            
-        # -- Legacy Regex Transformation (Current Working Path) --
+        # AST pre-pass: structural validation and kernel detection.
+        # This does not drive code generation — it exists to catch malformed
+        # input and enumerate kernels structurally (by parsing signatures,
+        # not regex-scanning raw text) before the regex pass runs, and to
+        # surface a warning instead of silently mistranslating when the
+        # parser can't make sense of the source.
+        try:
+            lexer = CUDALexer(cuda_source)
+            tokens = lexer.tokenize()
+            builder = AIRBuilder(tokens, self.ctx)
+            translation_unit = builder.build_translation_unit()
+            detected_kernels = [f.name for f in translation_unit.functions if f.is_kernel]
+            if not detected_kernels:
+                self.ctx.add_warning(
+                    "AST pre-pass did not recognize any __global__ kernel signatures in the "
+                    "source (the AST parser's grammar covers common patterns, not the full "
+                    "CUDA language, so this can be a false negative rather than a real "
+                    "absence); translation will proceed via regex rules regardless."
+                )
+        except Exception as e:
+            self.ctx.add_warning(f"AST pre-pass failed with {type(e).__name__}, proceeding with regex-only translation: {e}")
+
+        # -- Regex Transformation (current translation path; AST does not drive codegen yet) --
         
         # Phase 1: Preprocess - extract structure
         preprocessed = self._preprocess(cuda_source)
@@ -702,9 +709,18 @@ class AIRBuilder:
             
             # Check for function/kernel definition
             if self._is_function_start():
+                pos_before = self.pos
                 func = self._parse_function()
                 if func:
                     unit.functions.append(func)
+                if self.pos == pos_before:
+                    # _is_function_start() matched a qualifier (e.g. STATIC
+                    # or INLINE) that _parse_type() doesn't know how to
+                    # consume on its own, so _parse_function() bailed via
+                    # return None without advancing at all (e.g. a bare
+                    # top-level "static int counter;" declaration). Skip
+                    # the token rather than retrying it forever.
+                    self.advance()
             else:
                 self.advance()  # Skip unknown tokens
         
@@ -730,7 +746,26 @@ class AIRBuilder:
             elif self.current().type == TokenType.DEVICE:
                 is_device = True
             self.advance()
-        
+
+        # Skip __launch_bounds__(...) and similar call-like attributes that
+        # can appear between the __global__/__device__ qualifiers and the
+        # return type (e.g. `__global__ __launch_bounds__(256) void k(...)`).
+        # Recognized by name rather than a generic "any identifier(...)"
+        # heuristic, to avoid accidentally swallowing a real return-type-like
+        # macro.
+        while (self.current().type == TokenType.IDENTIFIER
+               and self.current().value == '__launch_bounds__'):
+            self.advance()  # consume __launch_bounds__
+            if self.current().type == TokenType.LPAREN:
+                self.advance()
+                paren_depth = 1
+                while paren_depth > 0 and self.current().type != TokenType.EOF:
+                    if self.current().type == TokenType.LPAREN:
+                        paren_depth += 1
+                    elif self.current().type == TokenType.RPAREN:
+                        paren_depth -= 1
+                    self.advance()
+
         # Parse return type
         return_type = self._parse_type()
         
@@ -746,11 +781,20 @@ class AIRBuilder:
         
         parameters = []
         while self.current().type != TokenType.RPAREN:
+            if self.current().type == TokenType.EOF:
+                return None
+            pos_before = self.pos
             param = self._parse_parameter()
             if param:
                 parameters.append(param)
             if self.current().type == TokenType.COMMA:
                 self.advance()
+            if self.pos == pos_before:
+                # _parse_parameter couldn't interpret the current token
+                # (e.g. a bare NUMBER or an unhandled punctuation token
+                # like '&' in parameter position) and made no progress —
+                # bail rather than spin forever re-parsing the same token.
+                return None
         
         self.expect(TokenType.RPAREN)
         
@@ -820,8 +864,11 @@ class AIRBuilder:
         while self.current().type == TokenType.LBRACKET:
             self.advance()
             while self.current().type != TokenType.RBRACKET:
+                if self.current().type == TokenType.EOF:
+                    break
                 self.advance()
-            self.advance()
+            if self.current().type == TokenType.RBRACKET:
+                self.advance()
             param_type.is_pointer = True
             param_type.pointer_depth += 1
         
