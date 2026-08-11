@@ -353,28 +353,24 @@ class LLVMIRParser:
         if not line or line.startswith(';'):
             return None
         
-        inst = LLVMInstruction(raw_text=line)
-        
         # Assignment form: %result = opcode operands
         assign_match = re.match(r'%(\w+)\s*=\s*(\w+)\s*(.*)', line)
         if assign_match:
             result_name = assign_match.group(1)
-            inst.opcode = assign_match.group(2)
-            operands_str = assign_match.group(3)
-            inst.result = LLVMValue(
+            opcode = assign_match.group(2)
+            result = LLVMValue(
                 name=result_name,
                 llvm_type=LLVMType(name="unknown")
             )
         else:
             # No result: opcode operands
             opcode_match = re.match(r'(\w+)\s*(.*)', line)
-            if opcode_match:
-                inst.opcode = opcode_match.group(1)
-                operands_str = opcode_match.group(2)
-            else:
+            if not opcode_match:
                 return None
-        
-        return inst
+            opcode = opcode_match.group(1)
+            result = None
+
+        return LLVMInstruction(opcode=opcode, result=result, raw_text=line)
     
     def _parse_declaration(self, line: str):
         """Parse a function declaration."""

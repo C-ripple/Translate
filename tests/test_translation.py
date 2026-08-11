@@ -5,6 +5,7 @@ Tests for both source-level and IR-level translation paths.
 """
 
 import pytest
+import re
 import sys
 from pathlib import Path
 
@@ -218,8 +219,8 @@ __global__ void reduce(float *input, float *output, int n) {
 }
 """
         result = translate_cuda_source(source)
-        
-        assert "__shared__" not in result
+
+        assert not re.search(SharedMemoryRule.PATTERN, result)
         assert "vtcm" in result.lower() or "aligned" in result
     
     def test_device_function(self):
@@ -347,7 +348,7 @@ __global__ void reduce(float *g_idata, float *g_odata, unsigned int n) {
         result = translate_cuda_source(source, target="hexagon")
         
         # Verify shared memory translation
-        assert "__shared__" not in result
+        assert not re.search(SharedMemoryRule.PATTERN, result)
         assert "sdata[256]" in result or "sdata" in result
 
 
