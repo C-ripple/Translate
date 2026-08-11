@@ -834,35 +834,35 @@ class AIRBuilder:
     def _parse_block(self) -> list[AIRNode]:
         """Parse a block of statements."""
         body = []
-        
+
         self.expect(TokenType.LBRACE)
         brace_count = 1
-        
+
         while brace_count > 0:
             if self.current().type == TokenType.LBRACE:
                 brace_count += 1
+                self.advance()
+                continue
             elif self.current().type == TokenType.RBRACE:
                 brace_count -= 1
+                self.advance()
+                continue
             elif self.current().type == TokenType.EOF:
                 break
-            
-            if brace_count > 0:
-                # Collect statement as expression
-                stmt_tokens = []
-                while self.current().type not in (TokenType.SEMICOLON, TokenType.LBRACE, 
-                                                   TokenType.RBRACE, TokenType.EOF):
-                    stmt_tokens.append(self.advance())
-                
-                if stmt_tokens:
-                    expr = ' '.join(t.value for t in stmt_tokens)
-                    body.append(AIRExpression(expr=expr))
-                
-                if self.current().type == TokenType.SEMICOLON:
-                    self.advance()
-        
-        if self.current().type == TokenType.RBRACE:
-            self.advance()
-        
+
+            # Collect statement as expression
+            stmt_tokens = []
+            while self.current().type not in (TokenType.SEMICOLON, TokenType.LBRACE,
+                                               TokenType.RBRACE, TokenType.EOF):
+                stmt_tokens.append(self.advance())
+
+            if stmt_tokens:
+                expr = ' '.join(t.value for t in stmt_tokens)
+                body.append(AIRExpression(expr=expr))
+
+            if self.current().type == TokenType.SEMICOLON:
+                self.advance()
+
         return body
 
 
