@@ -58,3 +58,6 @@ Thumbs.db
 *.ripple.ll
 output/
 temp_ripple_docs/
+
+# Git worktrees (superpowers:using-git-worktrees)
+.worktrees/
