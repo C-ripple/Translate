@@ -1,4 +1,14 @@
-# Hexagon toolchain (compile verification)
+# Hexagon toolchain (compile verification — deferred, not currently wired in)
+
+**Status:** vendored and ready, but not built or used by the active test suite. The
+project's actual compile-verification check (`tests/compile_verify.py`) uses a
+lightweight, no-build `clang -fsyntax-only` check instead — see that file's
+docstring. This full toolchain is heavy (30-90+ min build) and buys real
+Hexagon/HVX semantic and codegen validation, which is more than this project has
+needed so far; every translator bug found while this was under evaluation was
+caught by grammar/logic reasoning and targeted tests, not by compiling anything.
+Kept here for whenever RIPPLE-semantic correctness, not syntax, becomes the
+actual bottleneck.
 
 `hexagon-toolchain.Dockerfile` is a vendored copy of the official Hexagon/RIPPLE
 toolchain build from `qualcomm/learn-ripple` (see the provenance comment at the
@@ -18,15 +28,12 @@ several GB of disk on first run. It only needs to be run once — the resulting
 image (`cuda2ripple-hexagon-toolchain:latest`) is cached locally by Docker
 and reused by every test run after that.
 
-## What it's for
+## What it would be for (if wired in)
 
-`tests/compile_verify.py` uses this image to actually compile translated
-RIPPLE C output through a real Hexagon-targeting compiler, rather than
-trusting string-based assertions about what the translator's own output
-looks like. Tests using it (see `tests/test_compile_verification.py` and
-the real-kernel tests) skip automatically — not fail — when this image
-hasn't been built locally, so the normal `pytest tests/` run never depends
-on Docker being installed or this image existing.
+A future, heavier `tests/compile_verify.py` could use this image to actually
+compile translated RIPPLE C output through a real Hexagon-targeting compiler,
+validating real semantics and HVX codegen rather than just C syntax. Nothing
+in the test suite does this today — see the Status note above.
 
 ## Re-vendoring
 
