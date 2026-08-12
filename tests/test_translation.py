@@ -112,8 +112,8 @@ class TestTranslationRules:
         ctx = TranslationContext()
         
         result = rule.apply("blockDim.x * blockDim.y", ctx)
-        assert "ripple_get_size(ripple_block, 0)" in result
-        assert "ripple_get_size(ripple_block, 1)" in result
+        assert "ripple_get_block_size(ripple_block, 0)" in result
+        assert "ripple_get_block_size(ripple_block, 1)" in result
     
     def test_shared_memory_rule(self):
         rule = SharedMemoryRule()
@@ -147,7 +147,7 @@ class TestTranslationRuleEngine:
         
         assert "threadIdx" not in result
         assert "ripple_id" in result
-        assert "ripple_get_size" in result
+        assert "ripple_get_block_size" in result
     
     def test_rule_priority(self):
         engine = TranslationRuleEngine()

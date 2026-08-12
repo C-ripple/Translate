@@ -177,9 +177,9 @@ NVPTX_TO_RIPPLE = {
     NVPTXIntrinsic.TID_X: ("ripple_id", 0),
     NVPTXIntrinsic.TID_Y: ("ripple_id", 1),
     NVPTXIntrinsic.TID_Z: ("ripple_id", 2),
-    NVPTXIntrinsic.NTID_X: ("ripple_get_size", 0),
-    NVPTXIntrinsic.NTID_Y: ("ripple_get_size", 1),
-    NVPTXIntrinsic.NTID_Z: ("ripple_get_size", 2),
+    NVPTXIntrinsic.NTID_X: ("ripple_get_block_size", 0),
+    NVPTXIntrinsic.NTID_Y: ("ripple_get_block_size", 1),
+    NVPTXIntrinsic.NTID_Z: ("ripple_get_block_size", 2),
 }
 
 

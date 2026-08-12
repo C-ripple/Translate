@@ -7,7 +7,7 @@ source-level and IR-level frontends.
 
 Key Mappings:
     CUDA threadIdx.{x,y,z}  ->  ripple_id(block, {0,1,2})
-    CUDA blockDim.{x,y,z}   ->  ripple_get_size(block, {0,1,2})
+    CUDA blockDim.{x,y,z}   ->  ripple_get_block_size(block, {0,1,2})
     CUDA __shared__         ->  local array + VTCM hints (Hexagon)
     CUDA __syncthreads()    ->  implicit (SIMD model) or explicit barrier
     CUDA atomicAdd          ->  ripple_reduction or HVX scatter-accumulate
@@ -87,7 +87,7 @@ class ThreadIdxRule(TranslationRule):
 
 
 class BlockDimRule(TranslationRule):
-    """Translates blockDim.{x,y,z} to ripple_get_size()."""
+    """Translates blockDim.{x,y,z} to ripple_get_block_size()."""
     
     PATTERN = r'blockDim\.([xyz])'
     COMPONENT_MAP = {'x': 0, 'y': 1, 'z': 2}
@@ -95,7 +95,7 @@ class BlockDimRule(TranslationRule):
     def __init__(self):
         super().__init__(
             name="block_dim",
-            description="Translate blockDim to ripple_get_size",
+            description="Translate blockDim to ripple_get_block_size",
             cuda_pattern=self.PATTERN,
             priority=100
         )
@@ -104,7 +104,7 @@ class BlockDimRule(TranslationRule):
         def replace(match):
             component = match.group(1)
             dim = self.COMPONENT_MAP[component]
-            return f"ripple_get_size(ripple_block, {dim})"
+            return f"ripple_get_block_size(ripple_block, {dim})"
         
         return re.sub(self.PATTERN, replace, cuda_code)
 

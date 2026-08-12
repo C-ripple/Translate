@@ -98,7 +98,7 @@ python -m cuda2ripple.interfaces.web.server --port 5000
 |----------------|-------------------|
 | `threadIdx.x` | `ripple_id(block, 0)` |
 | `threadIdx.y` | `ripple_id(block, 1)` |
-| `blockDim.x` | `ripple_get_size(block, 0)` |
+| `blockDim.x` | `ripple_get_block_size(block, 0)` |
 | `blockIdx.x` | Outer loop variable `block_idx_x` |
 | `__global__ void kernel()` | `void kernel_ripple(grid_dims, block_dims, ...)` |
 | `__device__` | `static inline` |
@@ -183,7 +183,7 @@ void vectorAdd_ripple(
     for (int block_idx_x = 0; block_idx_x < grid_dim_x; block_idx_x++) {
         ripple_block_t ripple_block = ripple_set_block_shape(HVX_PE, block_dim_x);
         
-        int idx = ripple_id(ripple_block, 0) + block_idx_x * ripple_get_size(ripple_block, 0);
+        int idx = ripple_id(ripple_block, 0) + block_idx_x * ripple_get_block_size(ripple_block, 0);
         if (idx < n) {
             c[idx] = a[idx] + b[idx];
         }
@@ -221,7 +221,7 @@ void reduceSum_ripple(...) {
     sdata[tid] = input[tid];
     // __syncthreads: implicit in SIMD model
     
-    for (int s = ripple_get_size(ripple_block, 0) / 2; s > 0; s >>= 1) {
+    for (int s = ripple_get_block_size(ripple_block, 0) / 2; s > 0; s >>= 1) {
         if (tid < s) sdata[tid] += sdata[tid + s];
     }
     if (tid == 0) ripple_atomic_add(output, sdata[0]);

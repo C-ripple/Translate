@@ -55,15 +55,15 @@
 │  ║  │                    SEMANTIC MODEL (AIR)                         │  ║  │
 │  ║  │                    (semantic_model.py)                          │  ║  │
 │  ║  │                                                                 │  ║  │
-│  ║  │  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────┐  │  ║  │
-│  ║  │  │ CUDA Types  │    │   AIR       │    │   RIPPLE Types      │  │  ║  │
-│  ║  │  │             │ => │   Nodes     │ => │                     │  │  ║  │
-│  ║  │  │• threadIdx  │    │             │    │• ripple_id()        │  │  ║  │
-│  ║  │  │• blockDim   │    │• AIRFunction│    │• ripple_get_size()  │  │  ║  │
-│  ║  │  │• __shared__ │    │• AIRLoop    │    │• ripple_set_block() │  │  ║  │
-│  ║  │  │• atomicAdd  │    │• AIRMemOp   │    │• ripple_shuffle()   │  │  ║  │
-│  ║  │  │• __shfl_*   │    │• AIRSync    │    │• ripple_parallel()  │  │  ║  │
-│  ║  │  └─────────────┘    └─────────────┘    └─────────────────────┘  │  ║  │
+│  ║  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │  ║  │
+│  ║  │  │ CUDA Types  │  │   AIR       │  │   RIPPLE Types          │  │  ║  │
+│  ║  │  │             │=>│   Nodes     │=>│                         │  │  ║  │
+│  ║  │  │• threadIdx  │  │             │  │• ripple_id()            │  │  ║  │
+│  ║  │  │• blockDim   │  │• AIRFunction│  │• ripple_get_block_size()│  │  ║  │
+│  ║  │  │• __shared__ │  │• AIRLoop    │  │• ripple_set_block()     │  │  ║  │
+│  ║  │  │• atomicAdd  │  │• AIRMemOp   │  │• ripple_shuffle()       │  │  ║  │
+│  ║  │  │• __shfl_*   │  │• AIRSync    │  │• ripple_parallel()      │  │  ║  │
+│  ║  │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │  ║  │
 │  ║  └─────────────────────────────────────────────────────────────────┘  ║  │
 │  ║                                                                       ║  │
 │  ║  ┌─────────────────────────────────────────────────────────────────┐  ║  │
@@ -169,7 +169,7 @@ CUDA LLVM IR (.ll)
 | CUDA | RIPPLE | Notes |
 |------|--------|-------|
 | `threadIdx.x` | `ripple_id(block, 0)` | Lane index in SIMD vector |
-| `blockDim.x` | `ripple_get_size(block, 0)` | Vector width |
+| `blockDim.x` | `ripple_get_block_size(block, 0)` | Vector width |
 | `blockIdx.x` | Loop variable `block_idx_x` | Grid parallelism → loops |
 | `__global__` | Regular function + `ripple_set_block_shape()` | |
 | `__shared__` | VTCM-allocated array | Hexagon tightly-coupled memory |
