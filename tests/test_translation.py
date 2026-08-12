@@ -26,7 +26,7 @@ from frontends.source.cuda_frontend import (
 from frontends.ir.ir_frontend import (
     LLVMIRParser, IRAnalyzer, CUDAIRToRIPPLETranslator
 )
-from tests.compile_verify import verify_ripple_syntax
+from tests.compile_verify import requires_clang, verify_ripple_syntax
 
 
 # =============================================================================
@@ -1229,6 +1229,7 @@ __global__ void butterflyPartial(float *data, int max_i) {
     assert "if (16 < max_i)" in result
 
 
+@requires_clang
 def test_predicated_unroll_output_passes_syntax_check():
     source = """
 __global__ void haloExchange(float *data, int min_offset) {
@@ -1309,6 +1310,7 @@ __global__ void hasComment(float *data, int min_offset) {
     assert "not a compile-time constant" in str(exc_info.value)
 
 
+@requires_clang
 def test_predicated_unroll_braceless_body_supported():
     source = """
 __global__ void haloExchange(float *data, int min_offset) {
