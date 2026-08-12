@@ -28,7 +28,7 @@ from core.semantic_model import (
     AIRTranslationUnit, AIRSynchronization, AIRShuffleOp, AIRReductionOp,
     CUDABuiltinAccess, CUDADim3, CUDAMemorySpace, CUDASharedMemory,
     CUDAKernelLaunch, RIPPLEBlockShape, RIPPLEProcessingElement,
-    TranslationContext, HexagonConfig
+    TranslationContext, HexagonConfig, TranslationError
 )
 from core.translation_rules import TranslationRuleEngine, infer_block_shape
 
@@ -524,7 +524,10 @@ class CUDAToRIPPLETransformer:
         
         # Phase 4: Post-process and format
         result = self._postprocess(result)
-        
+
+        if self.ctx.has_errors():
+            raise TranslationError(self.ctx.errors)
+
         return result
     
     def _preprocess(self, source: str) -> str:

@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.semantic_model import (
     TranslationContext, HexagonConfig, RIPPLEBlockShape,
-    RIPPLEProcessingElement, CUDADim3
+    RIPPLEProcessingElement, CUDADim3, TranslationError
 )
 from core.translation_rules import (
     TranslationRuleEngine, ThreadIdxRule, BlockDimRule,
@@ -987,6 +987,15 @@ __global__ void kernel(float *val_ptr) {
     assert ctx.errors == []
     assert "*val_ptr = val;\n}" in result
     assert result.index("// note [3] }") < result.index("*val_ptr = val;")
+
+
+def test_transform_raises_when_ctx_has_errors():
+    ctx = TranslationContext()
+    ctx.add_error("synthetic test error")
+    transformer = CUDAToRIPPLETransformer(ctx)
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform("__global__ void kernel() {}")
+    assert "synthetic test error" in str(exc_info.value)
 
 
 # =============================================================================

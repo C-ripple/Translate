@@ -410,6 +410,29 @@ class AIRVisitor(ABC):
 # Translation Context
 # =============================================================================
 
+class TranslationError(Exception):
+    """
+    Raised by CUDAToRIPPLETransformer.transform() when translation
+    cannot produce valid output — i.e. ctx.has_errors() is True after
+    all rules have run. Carries the full list of errors (ctx.errors),
+    not just the first one, since multiple independent constructs in
+    the same file can each fail for their own reason.
+
+    This is a deliberate design choice: a translator that silently
+    writes an output file containing untranslated, non-compiling
+    fragments (with the only signal being a warning a caller can miss)
+    is worse than one that fails loudly. Every existing entry point —
+    the CLI, the web server — already wraps its call to the transformer
+    in a generic except Exception handler and reports failure
+    correctly, so raising here requires no changes to those callers.
+    """
+
+    def __init__(self, errors: list[str]):
+        self.errors = list(errors)
+        message = "Translation failed:\n" + "\n".join(f"  - {e}" for e in self.errors)
+        super().__init__(message)
+
+
 @dataclass
 class TranslationContext:
     """Context maintained during translation."""
