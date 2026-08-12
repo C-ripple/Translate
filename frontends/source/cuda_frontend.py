@@ -276,9 +276,9 @@ class CUDALexer:
         start_line = self.line
         start_col = self.column
         value = ""
-        
+
         # Handle hex, octal, binary
-        if self.current_char() == '0' and self.peek() in 'xXoObB':
+        if self.current_char() == '0' and self.peek() is not None and self.peek() in 'xXoObB':
             value += self.advance()
             value += self.advance()
         

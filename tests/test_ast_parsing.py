@@ -5,12 +5,13 @@ Tests for the AST-based parser in frontends/source/cuda_frontend.py
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from frontends.source.cuda_frontend import CUDALexer, AIRBuilder, CUDAToRIPPLETransformer
+from frontends.source.cuda_frontend import CUDALexer, AIRBuilder, CUDAToRIPPLETransformer, TokenType
 from core.semantic_model import TranslationContext
 
 
@@ -151,19 +152,29 @@ def test_static_declaration_before_kernel_still_finds_kernel():
 
 
 def test_transform_warns_when_ast_parse_fails():
-    # A source ending in a bare "0" hits a pre-existing lexer bug:
-    # CUDALexer.read_number() checks `self.peek() in 'xXoObB'` to detect a
-    # 0x/0o/0b prefix, but peek() returns None at end-of-source, and
-    # `None in 'xXoObB'` raises TypeError. This isn't a hang — it's a real,
-    # verified exception that reaches transform()'s except clause, giving
-    # genuine coverage for that branch (unlike the SyntaxError in
-    # AIRBuilder.expect(), which remains structurally unreachable — see
-    # the commit message for the history of that investigation).
-    # This repro relies on the CUDALexer.read_number() TypeError tracked in
-    # https://github.com/C-ripple/Translate/issues/7 — if that bug gets fixed,
-    # this test needs a different way to trigger the except branch (e.g.
-    # monkeypatching AIRBuilder.build_translation_unit to raise), not deletion.
+    # GitHub issue #7 (CUDALexer.read_number() TypeError on trailing bare digit)
+    # has been fixed. This test now uses monkeypatching to verify that
+    # transform() correctly catches and warns on AST parse exceptions.
+    # This exercises the except clause in transform(), giving coverage for that
+    # branch (unlike the SyntaxError in AIRBuilder.expect(), which remains
+    # structurally unreachable — see the commit message for issue #7).
     ctx = TranslationContext()
     transformer = CUDAToRIPPLETransformer(ctx)
-    transformer.transform("0")
+
+    with patch('frontends.source.cuda_frontend.AIRBuilder.build_translation_unit') as mock_build:
+        mock_build.side_effect = RuntimeError("Simulated parse failure")
+        transformer.transform("__global__ void dummy() {}")
+
     assert any("AST pre-pass failed" in w for w in ctx.warnings)
+
+
+def test_lexer_handles_trailing_bare_digit():
+    # CUDALexer.read_number() did `self.peek() in 'xXoObB'` to detect a
+    # 0x/0o/0b prefix; peek() returns None at end-of-source, and
+    # `None in 'xXoObB'` raises TypeError. A source ending in a bare
+    # digit (nothing after it at all) triggered this. GitHub issue #7.
+    lexer = CUDALexer("0")
+    tokens = lexer.tokenize()
+    number_tokens = [t for t in tokens if t.type == TokenType.NUMBER]
+    assert len(number_tokens) == 1
+    assert number_tokens[0].value == "0"
