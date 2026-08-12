@@ -428,7 +428,19 @@ class TranslationContext:
     # Diagnostics
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
-    
+
+    # Code to hoist to file scope, before any kernel definition. Used by
+    # rules that need a named helper function rather than an inline
+    # expression — e.g. warp-shuffle permutation functions, which C has
+    # no closure syntax for (see ShuffleDownRule/ShuffleXorRule/etc. in
+    # core/translation_rules.py). Each entry is a complete, self-contained
+    # C declaration/definition string. Consumed by
+    # CUDAToRIPPLETransformer._add_ripple_boilerplate(), which places
+    # these after the standard header/macros and before any translated
+    # kernel body, so "must be defined before use" holds regardless of
+    # which kernel in the file references which hoisted function.
+    hoisted_declarations: list[str] = field(default_factory=list)
+
     # Translation mode
     translation_mode: str = "source"  # "source" or "ir"
     preserve_comments: bool = True

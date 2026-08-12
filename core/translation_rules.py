@@ -282,6 +282,28 @@ class SyncWarpRule(TranslationRule):
 # Warp Shuffle Translation Rules
 # =============================================================================
 
+def _is_compile_time_constant_expr(expr: str) -> bool:
+    """
+    Rough check for whether a captured shuffle argument (delta/lane_mask/
+    src_lane) is a compile-time-constant-shaped expression (digits and
+    arithmetic operators only) rather than a reference to a kernel-local
+    variable. Hoisted shuffle helper functions are file-scope, so a
+    variable reference in the body would be out of scope — see the
+    non-constant case's handling in each shuffle rule below.
+
+    Also rejects unbalanced parens: the outer capture regex truncates at
+    the first `)`, so a parenthesized argument like `(1)` arrives here as
+    `(1` (dangling open paren) — shape-only checking would accept that as
+    "constant" and splice invalid C. Requiring balance makes that case
+    correctly fall through to the same safe untranslated+warned path as
+    a real variable reference, instead of emitting broken C silently.
+    """
+    stripped = expr.strip()
+    if not stripped or re.fullmatch(r'[\d\s+\-*/()]+', stripped) is None:
+        return False
+    return stripped.count('(') == stripped.count(')')
+
+
 class ShuffleDownRule(TranslationRule):
     """Translates __shfl_down_sync to ripple_shuffle."""
     
@@ -301,19 +323,35 @@ class ShuffleDownRule(TranslationRule):
             value = match.group(2).strip()
             delta = match.group(3).strip()
             width = match.group(4).strip() if match.group(4) else "32"
-            
-            # Generate shuffle function for down-shuffle
-            shuffle_fn = f"""
+
+            # The hoisted function is file-scope, so it can only reference
+            # what the call site captures textually. A kernel-local
+            # variable (e.g. a loop counter) isn't in scope there — only a
+            # compile-time-constant-shaped expression is safe to splice in.
+            if not _is_compile_time_constant_expr(delta):
+                ctx.add_warning(
+                    f"ShuffleDownRule: left __shfl_down_sync(...) untranslated — "
+                    f"delta '{delta}' is not a compile-time constant. "
+                    f"ripple_shuffle's permutation function is file-scope and "
+                    f"cannot reference kernel-local variables like '{delta}'."
+                )
+                return match.group(0)
+
+            # Hoist to file scope instead of inlining — a function
+            # definition inside another function's body is not valid
+            # standard C, and the old inline placement did exactly that
+            # since this substitution always fires inside a kernel's
+            # statement list.
+            fn_name = f"__ripple_shfl_down_{len(ctx.hoisted_declarations)}"
+            ctx.hoisted_declarations.append(f"""
 // Shuffle down by {delta}
-static inline size_t shfl_down_fn(size_t k, size_t n) {{
-    size_t src = k + {delta};
-    return (src < n) ? src : k;  // Clamp to valid range
-}}"""
-            
-            ctx.add_warning(f"Shuffle down: ensure {delta} is compile-time constant for best codegen")
-            
-            return f"ripple_shuffle({value}, shfl_down_fn) /* mask={mask}, width={width} */"
-        
+static inline size_t {fn_name}(size_t k, size_t block_size) {{
+    size_t src = k + ({delta});
+    return (src < block_size) ? src : k;  // Clamp to valid range
+}}""")
+
+            return f"ripple_shuffle({value}, {fn_name}) /* mask={mask}, width={width} */"
+
         return re.sub(self.PATTERN, replace, cuda_code)
 
 
@@ -335,9 +373,33 @@ class ShuffleXorRule(TranslationRule):
             mask = match.group(1).strip()
             value = match.group(2).strip()
             lane_mask = match.group(3).strip()
-            
-            return f"ripple_shuffle({value}, [](size_t k, size_t n) {{ return k ^ {lane_mask}; }})"
-        
+
+            # The hoisted function is file-scope, so it can only reference
+            # what the call site captures textually. A kernel-local
+            # variable isn't in scope there — only a compile-time-constant-
+            # shaped expression is safe to splice in.
+            if not _is_compile_time_constant_expr(lane_mask):
+                ctx.add_warning(
+                    f"ShuffleXorRule: left __shfl_xor_sync(...) untranslated — "
+                    f"lane_mask '{lane_mask}' is not a compile-time constant. "
+                    f"ripple_shuffle's permutation function is file-scope and "
+                    f"cannot reference kernel-local variables like '{lane_mask}'."
+                )
+                return match.group(0)
+
+            # C has no lambdas/closures — ripple_shuffle takes a plain
+            # named function pointer (api.md:443-527: "In C, this is
+            # expressed using a 'shuffle function'... which exclusively
+            # takes k and the block size"). Hoist a uniquely-named,
+            # file-scope function instead of inlining a C++-only lambda.
+            fn_name = f"__ripple_shfl_xor_{len(ctx.hoisted_declarations)}"
+            ctx.hoisted_declarations.append(f"""
+static inline size_t {fn_name}(size_t k, size_t block_size) {{
+    return k ^ ({lane_mask});
+}}""")
+
+            return f"ripple_shuffle({value}, {fn_name})"
+
         return re.sub(self.PATTERN, replace, cuda_code)
 
 
@@ -359,9 +421,28 @@ class ShuffleUpRule(TranslationRule):
             mask = match.group(1).strip()
             value = match.group(2).strip()
             delta = match.group(3).strip()
-            
-            return f"ripple_shuffle({value}, [](size_t k, size_t n) {{ return (k >= {delta}) ? k - {delta} : k; }})"
-        
+
+            # The hoisted function is file-scope, so it can only reference
+            # what the call site captures textually. A kernel-local
+            # variable isn't in scope there — only a compile-time-constant-
+            # shaped expression is safe to splice in.
+            if not _is_compile_time_constant_expr(delta):
+                ctx.add_warning(
+                    f"ShuffleUpRule: left __shfl_up_sync(...) untranslated — "
+                    f"delta '{delta}' is not a compile-time constant. "
+                    f"ripple_shuffle's permutation function is file-scope and "
+                    f"cannot reference kernel-local variables like '{delta}'."
+                )
+                return match.group(0)
+
+            fn_name = f"__ripple_shfl_up_{len(ctx.hoisted_declarations)}"
+            ctx.hoisted_declarations.append(f"""
+static inline size_t {fn_name}(size_t k, size_t block_size) {{
+    return (k >= ({delta})) ? k - ({delta}) : k;
+}}""")
+
+            return f"ripple_shuffle({value}, {fn_name})"
+
         return re.sub(self.PATTERN, replace, cuda_code)
 
 
@@ -383,9 +464,28 @@ class ShuffleSyncRule(TranslationRule):
             mask = match.group(1).strip()
             value = match.group(2).strip()
             src_lane = match.group(3).strip()
-            
-            return f"ripple_shuffle({value}, [](size_t k, size_t n) {{ return {src_lane}; }})"
-        
+
+            # The hoisted function is file-scope, so it can only reference
+            # what the call site captures textually. A kernel-local
+            # variable isn't in scope there — only a compile-time-constant-
+            # shaped expression is safe to splice in.
+            if not _is_compile_time_constant_expr(src_lane):
+                ctx.add_warning(
+                    f"ShuffleSyncRule: left __shfl_sync(...) untranslated — "
+                    f"src_lane '{src_lane}' is not a compile-time constant. "
+                    f"ripple_shuffle's permutation function is file-scope and "
+                    f"cannot reference kernel-local variables like '{src_lane}'."
+                )
+                return match.group(0)
+
+            fn_name = f"__ripple_shfl_sync_{len(ctx.hoisted_declarations)}"
+            ctx.hoisted_declarations.append(f"""
+static inline size_t {fn_name}(size_t k, size_t block_size) {{
+    return ({src_lane});
+}}""")
+
+            return f"ripple_shuffle({value}, {fn_name})"
+
         return re.sub(self.PATTERN, replace, cuda_code)
 
 

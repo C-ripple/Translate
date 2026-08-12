@@ -17,7 +17,15 @@ now passes its syntax check cleanly like the others. Note this file's
 loop shape gets fully replaced by WarpReductionRule (priority 85)
 before ShuffleDownRule (priority 70) ever sees the __shfl_down_sync
 call, so it doesn't exercise the separate warp-shuffle lambda bug
-tracked as issue #8 — that bug currently has no coverage in this file.
+tracked as issue #8.
+
+warp_shuffle_xor.cu covers issue #8: a direct __shfl_xor_sync call
+(butterfly-exchange shape, not the halving loop WarpReductionRule
+matches) that reaches ShuffleXorRule. All four shuffle rules used to
+emit either a C++ lambda or a nested function definition — neither
+valid C — as an inline ripple_shuffle() argument; they now hoist a
+uniquely-named, file-scope helper function instead (see
+TranslationContext.hoisted_declarations in core/semantic_model.py).
 """
 
 import sys
@@ -39,6 +47,7 @@ KERNEL_FILES = [
     "bitwise_intrinsics.cu",
     "global_thread_index.cu",
     "warp_reduction.cu",
+    "warp_shuffle_xor.cu",
 ]
 
 SYNTAX_CHECK_PARAMS = [
@@ -48,6 +57,7 @@ SYNTAX_CHECK_PARAMS = [
     "bitwise_intrinsics.cu",
     "global_thread_index.cu",
     "warp_reduction.cu",
+    "warp_shuffle_xor.cu",
 ]
 
 

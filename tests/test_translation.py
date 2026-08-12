@@ -392,6 +392,179 @@ class TestHexagonConfig:
 
 
 # =============================================================================
+# Warp Shuffle Hoisting Tests (GitHub issue #8)
+# =============================================================================
+
+def test_shuffle_xor_hoists_named_function_not_lambda():
+    # The lane_mask argument (1) is passed as a literal, not through a
+    # local variable — this is deliberate. The hoisted permutation
+    # function is file-scope, so it can only safely capture a
+    # compile-time-constant-shaped expression; a variable reference here
+    # is the separate untranslated-with-warning case covered by
+    # test_shuffle_with_variable_argument_is_left_untranslated_with_warning
+    # below (GitHub issue #8 follow-up).
+    source = """
+__global__ void kernel(int *a) {
+    int val = a[0];
+    int result = __shfl_xor_sync(0xffffffff, val, 1);
+    a[0] = result;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "[]" not in result  # no C++ lambda capture syntax anywhere
+    assert "auto " not in result  # no C++ auto either
+    # The call site should reference a plain named function, not inline it.
+    call_match = re.search(r'ripple_shuffle\(\s*val\s*,\s*(\w+)\s*\)', result)
+    assert call_match, f"expected a plain ripple_shuffle(val, <name>) call, got:\n{result}"
+    fn_name = call_match.group(1)
+    # That name must be defined as a real, named, file-scope function
+    # BEFORE the kernel that calls it (i.e. before the kernel's own
+    # opening brace in the output), not nested inside it.
+    fn_def_pos = result.find(f"size_t {fn_name}(size_t")
+    kernel_start_pos = result.find("kernel_ripple(")
+    assert fn_def_pos != -1, f"expected a definition of {fn_name}, got:\n{result}"
+    assert fn_def_pos < kernel_start_pos, (
+        f"{fn_name} must be defined before the kernel that uses it, "
+        f"not nested inside it (def at {fn_def_pos}, kernel at {kernel_start_pos})"
+    )
+
+
+def test_multiple_shuffle_calls_get_unique_function_names():
+    source = """
+__global__ void kernel(int *a, int *b) {
+    int v1 = a[0];
+    int v2 = b[0];
+    int r1 = __shfl_xor_sync(0xffffffff, v1, 1);
+    int r2 = __shfl_xor_sync(0xffffffff, v2, 2);
+    a[0] = r1;
+    b[0] = r2;
+}
+"""
+    result = translate_cuda_source(source)
+    names = re.findall(r'ripple_shuffle\(\s*\w+\s*,\s*(\w+)\s*\)', result)
+    assert len(names) == 2, f"expected 2 ripple_shuffle calls, found: {names}"
+    assert names[0] != names[1], f"shuffle helper function names collided: {names}"
+
+
+def test_shuffle_with_variable_argument_is_left_untranslated_with_warning():
+    # The hoisted permutation function is file-scope, so it cannot
+    # reference a kernel-local variable like `n` — the old behavior
+    # spliced `n` into the function body verbatim, producing C that
+    # fails to compile ("use of undeclared identifier"). The correct
+    # behavior is to leave the CUDA call untranslated and warn, rather
+    # than emit confusingly-broken output.
+    source = """
+__global__ void kernel(int *a, int n) {
+    int val = a[0];
+    int result = __shfl_xor_sync(0xffffffff, val, n);
+    a[0] = result;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    result = transformer.transform(source)
+    assert "__shfl_xor_sync" in result  # left untranslated, not silently broken
+    assert "ripple_shuffle(" not in result  # and definitely not ALSO translated
+    assert any(
+        "compile-time constant" in w or "not a compile-time constant" in w
+        for w in ctx.warnings
+    ), f"expected a compile-time-constant warning, got: {ctx.warnings}"
+
+
+def test_shuffle_with_literal_argument_still_hoists_correctly():
+    # Regression guard: the fix for the variable case must not break the
+    # already-fixed literal case.
+    source = """
+__global__ void kernel(int *a) {
+    int val = a[0];
+    int result = __shfl_xor_sync(0xffffffff, val, 1);
+    a[0] = result;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_xor_sync" not in result
+    assert "ripple_shuffle(" in result
+
+
+def test_shuffle_with_parenthesized_constant_argument_left_untranslated_with_warning():
+    # Regression guard for a paren-balance bug: the outer capture regex
+    # (`[^,\)]+`) truncates at the FIRST `)`, so a perfectly ordinary
+    # parenthesized constant like `(1)` arrives at
+    # _is_compile_time_constant_expr as `(1` — a dangling unmatched open
+    # paren. A shape-only check (digits/operators/parens, no balance
+    # requirement) would accept that as "constant" and splice the
+    # dangling paren into the hoisted function body, producing malformed
+    # C ("return k ^ ((1);") with zero warnings. The fix requires
+    # balanced parens, so this must degrade to the same safe
+    # untranslated+warned path as a real variable reference.
+    source = """
+__global__ void kernel(int *a) {
+    int val = a[0];
+    int result = __shfl_xor_sync(0xffffffff, val, (1));
+    a[0] = result;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    result = transformer.transform(source)
+    assert "__shfl_xor_sync" in result  # left untranslated, not silently broken
+    assert "ripple_shuffle(" not in result
+    assert "((1)" not in result  # the specific malformed-paren splice must not appear
+    assert any(
+        "compile-time constant" in w or "not a compile-time constant" in w
+        for w in ctx.warnings
+    ), f"expected a compile-time-constant warning, got: {ctx.warnings}"
+
+
+@pytest.mark.parametrize("intrinsic", [
+    "__shfl_xor_sync(0xffffffff, val, {arg})",
+    "__shfl_up_sync(0xffffffff, val, {arg})",
+    "__shfl_sync(0xffffffff, val, {arg})",
+    "__shfl_down_sync(0xffffffff, val, {arg})",
+])
+def test_shuffle_variable_argument_left_untranslated_across_all_rules(intrinsic):
+    # All 4 shuffle rules share the same (hand-copied, not shared-function)
+    # gating pattern. Prove each one actually gates, not just ShuffleXorRule
+    # — a future edit to one rule could silently diverge from the others
+    # with nothing to catch it otherwise.
+    call = intrinsic.format(arg="n")
+    source = f"""
+__global__ void kernel(int *a, int n) {{
+    int val = a[0];
+    int result = {call};
+    a[0] = result;
+}}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    result = transformer.transform(source)
+    assert call in result  # left untranslated
+    assert "ripple_shuffle(" not in result
+    assert any("compile-time constant" in w for w in ctx.warnings), (
+        f"expected a compile-time-constant warning, got: {ctx.warnings}"
+    )
+
+
+@pytest.mark.parametrize("intrinsic", [
+    "__shfl_xor_sync(0xffffffff, val, 1)",
+    "__shfl_up_sync(0xffffffff, val, 1)",
+    "__shfl_sync(0xffffffff, val, 1)",
+    "__shfl_down_sync(0xffffffff, val, 1)",
+])
+def test_shuffle_literal_argument_hoists_across_all_rules(intrinsic):
+    source = f"""
+__global__ void kernel(int *a) {{
+    int val = a[0];
+    int result = {intrinsic};
+    a[0] = result;
+}}
+"""
+    result = translate_cuda_source(source)
+    assert intrinsic.split("(")[0] not in result  # the CUDA intrinsic name is gone
+    assert "ripple_shuffle(" in result
+
+
+# =============================================================================
 # Run Tests
 # =============================================================================
 

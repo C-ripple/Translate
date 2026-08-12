@@ -337,6 +337,14 @@ Commands:
                 try:
                     with open(filepath, 'r') as f:
                         cuda_source = f.read()
+                    # Fresh context per file: TranslationContext now
+                    # accumulates per-translation state (hoisted_declarations,
+                    # warnings — see core/semantic_model.py) that must not
+                    # leak between unrelated files translated in the same
+                    # REPL session. Reusing the loop-level ctx here caused a
+                    # translated file with no shuffle calls to still show a
+                    # previous file's unreferenced hoisted shuffle helper.
+                    ctx = TranslationContext(target_platform=args.target)
                     transformer = CUDAToRIPPLETransformer(ctx)
                     ripple_source = transformer.transform(cuda_source)
                     print(ripple_source)
