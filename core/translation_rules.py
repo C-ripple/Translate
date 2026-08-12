@@ -352,10 +352,15 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
         (if/while/do/for/switch, spelled `kw (` or `kw(`) is left
         untouched — its single trailing-semicolon capture can't safely
         represent multi-statement control flow (e.g. if/else).
-      - A body containing any `"` or `'` character is left untouched,
-        for both braced and braceless bodies — neither pattern is
-        string/char-literal-aware, so a `}` or `;` inside a literal
-        could otherwise be misread as the loop's real delimiter.
+      - A body containing a string/char literal (`"` or `'`) or a
+        comment opener (`/*` or `//`) anywhere is left untouched, for
+        both braced and braceless bodies — neither pattern is
+        literal- or comment-aware, so a `}` or `;` inside a string,
+        char literal, or comment could otherwise be misread as the
+        loop's real delimiter (confirmed severe for the braced case:
+        a `}` inside a comment can splice the function's real closing
+        brace and everything after it outside the function body,
+        invisibly — ctx.errors stays empty).
     """
 
     # Matched at the start of a braceless body to bail out on control
@@ -368,6 +373,16 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
     # first-token check would miss the no-space spelling entirely and
     # let the exact bug back in for idiomatic code like `if(cond) ...`.
     CONTROL_FLOW_PREFIX = re.compile(r'\s*(?:if|while|do|for|switch)\b')
+
+    # Any of these appearing anywhere in a captured body means "don't
+    # touch this loop" (see _replace()). Neither PATTERN_BRACED's
+    # `}`-delimited capture nor PATTERN_BRACELESS's `;`-delimited
+    # capture understands string/char literals or comments, so a `}`
+    # or `;` inside one of these can be misread as the loop's real
+    # delimiter. `"` and `'` cover string/char literals; `/*` and `//`
+    # cover both comment styles (a `}` or `;` inside either kind is
+    # just as invisible to the regex as one inside a string).
+    UNSAFE_BODY_TOKENS = ('"', "'", '/*', '//')
 
     _LITERAL_OR_WARPSIZE = r'(\d+|warpSize)'
 
@@ -466,27 +481,36 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
         step = int(match.group(6))
         body = match.group(7)
 
-        if '"' in body or "'" in body:
+        if any(tok in body for tok in self.UNSAFE_BODY_TOKENS):
             # Neither PATTERN_BRACED's `}`-delimited capture nor
             # PATTERN_BRACELESS's `;`-delimited capture is aware of
-            # string/char literals, so a `}` or `;` INSIDE a literal
-            # (e.g. `printf("}")`) can be misread as the loop's real
-            # closing delimiter. For the braced case this is severe:
-            # the capture truncates mid-literal, and everything
-            # textually after it in the file — including the loop's
-            # REAL closing brace and any code after the loop — ends up
-            # spliced outside the function body, with no warning or
-            # error raised (ctx.errors stays empty; only the benign
-            # "Unrolled loop..." success warning fires). Real
-            # tokenization to skip literal contents correctly is out of
-            # scope for what should be a narrow, defensive check, so
-            # bail out bluntly instead: any quote character anywhere in
-            # the captured body, for BOTH body shapes, checked before
-            # any other logic runs. This costs nothing for realistic
-            # input — a shuffle-loop body containing an actual
-            # string/char literal is already a contrived shape; nobody
-            # puts printf debug statements inside a hot warp-shuffle
-            # reduction loop.
+            # string/char literals OR comments, so a `}` or `;` INSIDE
+            # one of these (e.g. `printf("}")`, or a trailing
+            # `// note [3] }` comment) can be misread as the loop's
+            # real closing delimiter. For the braced case this is
+            # severe: the capture truncates mid-literal/mid-comment,
+            # and everything textually after it in the file —
+            # including the loop's REAL closing brace and any code
+            # after the loop — ends up spliced outside the function
+            # body, with no warning or error raised (ctx.errors stays
+            # empty; only the benign "Unrolled loop..." success
+            # warning fires). Real tokenization to skip literal/comment
+            # contents correctly is out of scope for what should be a
+            # narrow, defensive check, so bail out bluntly instead: any
+            # of '"', "'", '/*', '//' anywhere in the captured body,
+            # for BOTH body shapes, checked before any other logic
+            # runs. (Verified PATTERN_BRACELESS's own bounded,
+            # first-semicolon capture can't reach the same severe
+            # cross-statement corruption — its match span never
+            # extends past its own terminator — but it's included here
+            # too for the same reason the quote check already covers
+            # both shapes: one uniform rule is simpler to reason about
+            # than two shape-specific exceptions, and it costs nothing
+            # for realistic input. A shuffle-loop body containing an
+            # actual string/char literal or comment is already a
+            # contrived shape — nobody puts printf debug statements or
+            # footnote comments inside a hot warp-shuffle reduction
+            # loop.)
             return match.group(0)
 
         if is_braceless and self.CONTROL_FLOW_PREFIX.match(body):

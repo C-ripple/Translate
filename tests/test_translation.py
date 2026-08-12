@@ -865,6 +865,96 @@ __global__ void kernel(float *val_ptr) {
     assert result.index('printf("}");') < result.index("*val_ptr = val;")
 
 
+def test_unroll_braceless_body_with_string_literal_left_untouched():
+    # Companion to the braced case above: the quote-character bail-out
+    # is meant to cover both PATTERN_BRACED and PATTERN_BRACELESS, but
+    # only the braced shape had a committed regression test (found in
+    # review — the braceless path was only verified manually, not
+    # guarded by CI). A braceless body containing a quote character
+    # (here, a semicolon inside a string, which would otherwise hit the
+    # SAME truncation class of bug PATTERN_BRACELESS had before its own
+    # control-flow fix) must also bail out untouched.
+    source = """
+__global__ void kernel(float *val_ptr) {
+    float val = *val_ptr;
+    for (int i = 1; i < 8; i *= 2)
+        val += __shfl_xor_sync(0xffffffff, val, i) + strlen(";");
+    *val_ptr = val;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    result = transformer.transform(source)
+
+    assert 'strlen(";")' in result
+    assert "ripple_shuffle(" not in result
+    assert ctx.errors == []
+    assert "*val_ptr = val;\n}" in result
+
+
+def test_unroll_braced_body_with_block_comment_left_untouched():
+    # Critical regression guard, same danger class as the string-literal
+    # case above but via a comment instead: PATTERN_BRACED's body
+    # capture (`\{([^{}]*)\}`) is also unaware of comments, so a `}`
+    # INSIDE a `/* ... */` block comment is misread as the loop's real
+    # closing brace. This is arguably MORE likely in real code than the
+    # printf case — an ordinary trailing note with a stray bracket is
+    # mundane, where a printf debug call inside a hot shuffle loop is
+    # contrived. Reproducing the exact reported bug without this fix:
+    # the capture truncated mid-comment, and everything textually after
+    # it in the file — including the loop's REAL closing brace and the
+    # trailing `*val_ptr = val;` assignment — ended up spliced OUTSIDE
+    # the function body, with ctx.errors staying empty and only the
+    # benign "Unrolled loop..." success warning firing.
+    source = """
+__global__ void kernel(float *val_ptr) {
+    float val = *val_ptr;
+    for (int i = 1; i < 8; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i); /* note [3] } */
+    }
+    *val_ptr = val;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    result = transformer.transform(source)
+
+    assert "/* note [3] } */" in result
+    assert "ripple_shuffle(" not in result
+    assert ctx.errors == []
+    # Structural integrity: trailing assignment still inside the
+    # function, immediately followed by the function's own closing
+    # brace — not floating outside it.
+    assert "*val_ptr = val;\n}" in result
+    assert result.index("/* note [3] } */") < result.index("*val_ptr = val;")
+
+
+def test_unroll_braced_body_with_line_comment_left_untouched():
+    # Companion to the block-comment case above, for `//` line
+    # comments — the coordinator's exact reported repro. Same
+    # corruption mechanism: a `}` inside a `//` comment is misread as
+    # the loop's real closing brace, silently splicing the function's
+    # real structure apart with zero errors raised.
+    source = """
+__global__ void kernel(float *val_ptr) {
+    float val = *val_ptr;
+    for (int i = 1; i < 8; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i); // note [3] }
+    }
+    *val_ptr = val;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    result = transformer.transform(source)
+
+    assert "// note [3] }" in result
+    assert "ripple_shuffle(" not in result
+    assert ctx.errors == []
+    assert "*val_ptr = val;\n}" in result
+    assert result.index("// note [3] }") < result.index("*val_ptr = val;")
+
+
 # =============================================================================
 # Run Tests
 # =============================================================================
