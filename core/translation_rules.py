@@ -349,6 +349,13 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
     fires when BODY contains a shuffle call and references VAR
     somewhere in the body — an unrelated countable loop is left alone.
 
+    ButterflyAllReduceRule (higher priority, checked first) claims the
+    specific subset of this shape that's a full-warp XOR-butterfly
+    all-reduce with a full mask — see its docstring. This rule still
+    handles everything else: partial-width/segmented reductions,
+    non-full masks, and every non-reduction shuffle loop this pattern
+    matches.
+
     Known limitations (each one is a deliberate bail-out to the
     original, untouched loop text, not a translation attempt):
       - A braced body may contain nested simple statements but not
@@ -858,13 +865,26 @@ class ButterflyAllReduceRule(TranslationRule):
     The loop then falls through to UnrollConstantShuffleLoopRule, which
     is still correct for these cases (it attaches no reduction-specific
     meaning to the loop, just literal substitution), just not optimal.
+
+    The two guards are enforced at different layers: BOUND is baked
+    into PATTERN itself (the `32|warpSize` alternation), so a smaller
+    bound simply never matches — matches() already returns False. MASK
+    can't be guard-railed the same way (it needs a semantic literal
+    comparison, not a shape check), so PATTERN captures it loosely and
+    apply() checks it explicitly against FULL_MASK before deciding
+    whether to fire.
     """
 
+    # Group 1: Loop variable (e.g. "i")
+    # Group 2: Loop bound — literal "32" or symbolic "warpSize"
+    # Group 3: Accumulator variable (e.g. "val")
+    # Group 4: Shuffle mask expression — checked against FULL_MASK below,
+    #          not constrained by the pattern itself (see class docstring)
     PATTERN = (
         r'for\s*\(\s*int\s+(\w+)\s*=\s*1\s*;\s*'
         r'\1\s*<\s*(32|warpSize)\s*;\s*'
         r'\1\s*\*=\s*2\s*\)\s*\{\s*'
-        r'(\w+)\s*\+=\s*__shfl_xor_sync\s*\(\s*([^,]+?)\s*,\s*\3\s*,\s*\1\s*\)\s*;\s*\}'
+        r'(\w+)\s*\+=\s*__shfl_xor_sync\s*\(\s*([^,]+)\s*,\s*\3\s*,\s*\1\s*\)\s*;\s*\}'
     )
 
     FULL_MASK = "0xffffffff"
