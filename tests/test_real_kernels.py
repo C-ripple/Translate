@@ -48,6 +48,7 @@ KERNEL_FILES = [
     "global_thread_index.cu",
     "warp_reduction.cu",
     "warp_shuffle_xor.cu",
+    "butterfly_reduction.cu",
 ]
 
 SYNTAX_CHECK_PARAMS = [
@@ -58,6 +59,7 @@ SYNTAX_CHECK_PARAMS = [
     "global_thread_index.cu",
     "warp_reduction.cu",
     "warp_shuffle_xor.cu",
+    "butterfly_reduction.cu",
 ]
 
 
