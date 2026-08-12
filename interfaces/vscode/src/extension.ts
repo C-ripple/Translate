@@ -38,6 +38,12 @@ function getConfig(): Cuda2RippleConfig {
 // Translation Engine (Local)
 // =============================================================================
 
+// NOTE: duplicates core/translation_rules.py's replacement rules
+// independently (not a wrapper around the Python translator) — a rule
+// fixed there must be fixed here too, or it silently drifts. See
+// GitHub issue #9 for the bug this caused and why a full fix (having
+// this extension call into the Python translator instead) was
+// deliberately deferred as a separate, bigger decision.
 class LocalTranslator {
     private config: Cuda2RippleConfig;
 
