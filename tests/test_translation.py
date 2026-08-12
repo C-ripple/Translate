@@ -873,6 +873,7 @@ __global__ void kernel(float *val_ptr) {
     with pytest.raises(TranslationError) as exc_info:
         transformer.transform(source)
     assert "not a compile-time constant" in str(exc_info.value)
+    assert "'i'" in str(exc_info.value)
 
 
 def test_unroll_braceless_body_with_string_literal_left_untouched():
@@ -908,6 +909,7 @@ __global__ void kernel(float *val_ptr) {
     with pytest.raises(TranslationError) as exc_info:
         transformer.transform(source)
     assert "not a compile-time constant" in str(exc_info.value)
+    assert "'i'" in str(exc_info.value)
 
 
 def test_unroll_braceless_body_with_comment_left_untouched():
@@ -950,6 +952,7 @@ __global__ void kernel(float *val_ptr) {
     with pytest.raises(TranslationError) as exc_info:
         transformer.transform(source)
     assert "not a compile-time constant" in str(exc_info.value)
+    assert "'i'" in str(exc_info.value)
 
 
 def test_unroll_braced_body_with_block_comment_left_untouched():
@@ -995,6 +998,7 @@ __global__ void kernel(float *val_ptr) {
     with pytest.raises(TranslationError) as exc_info:
         transformer.transform(source)
     assert "not a compile-time constant" in str(exc_info.value)
+    assert "'i'" in str(exc_info.value)
 
 
 def test_unroll_braced_body_with_line_comment_left_untouched():
@@ -1019,6 +1023,7 @@ __global__ void kernel(float *val_ptr) {
     assert "ripple_shuffle(" not in result
     assert ctx.errors == []
     assert "*val_ptr = val;\n}" in result
+    assert result.index("// note [3] }") < result.index("*val_ptr = val;")
 
     # Pipeline level: the untouched 'i' now reaches ShuffleXorRule,
     # which can't resolve it — the full transform must hard-fail (Task
@@ -1028,7 +1033,7 @@ __global__ void kernel(float *val_ptr) {
     with pytest.raises(TranslationError) as exc_info:
         transformer.transform(source)
     assert "not a compile-time constant" in str(exc_info.value)
-    assert result.index("// note [3] }") < result.index("*val_ptr = val;")
+    assert "'i'" in str(exc_info.value)
 
 
 def test_transform_raises_when_ctx_has_errors():
