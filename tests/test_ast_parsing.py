@@ -41,7 +41,7 @@ __global__ void oneNested(float *a, int n) {
 """
 
 # Brace-nesting depth 2: matches the exact shape that hung before the fix —
-# a for-loop body containing an if-body (test_reduction.cu in the repo).
+# a for-loop body containing an if-body (tests/examples/warp_reduction.cu in the repo).
 KERNEL_TWO_NESTED = """
 __global__ void reduce(float *val) {
     float sum = *val;
