@@ -266,7 +266,7 @@ def cmd_batch(args):
             # stay True for every file after the first failure, misreporting
             # otherwise-successful later files as FAILED. Same bug class
             # cmd_interactive's 'file' handler already fixed — see its
-            # comment above.
+            # comment below.
             ctx = TranslationContext(target_platform=args.target)
             transformer = CUDAToRIPPLETransformer(ctx)
             ripple_source = transformer.transform(cuda_source)
