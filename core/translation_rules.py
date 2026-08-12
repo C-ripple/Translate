@@ -289,14 +289,34 @@ def _is_compile_time_constant_expr(expr: str) -> bool:
     arithmetic operators only) rather than a reference to a kernel-local
     variable. Hoisted shuffle helper functions are file-scope, so a
     variable reference in the body would be out of scope — see the
-    non-constant case's handling in each shuffle rule below.
+    non-constant case's handling in each shuffle rule below. Variable
+    (non-constant) shuffle arguments are a known, deliberate gap tracked
+    as GitHub issue #11 — ripple_shuffle's function-pointer signature is
+    fixed at exactly (k, block_size), so there's no clean way to thread
+    an arbitrary runtime value through it; this function exists to
+    detect that case and hand it off to the safe degrade-and-warn path
+    below, not to solve it.
 
-    Also rejects unbalanced parens: the outer capture regex truncates at
-    the first `)`, so a parenthesized argument like `(1)` arrives here as
-    `(1` (dangling open paren) — shape-only checking would accept that as
-    "constant" and splice invalid C. Requiring balance makes that case
-    correctly fall through to the same safe untranslated+warned path as
-    a real variable reference, instead of emitting broken C silently.
+    Deliberate convention note: on a non-constant argument, the shuffle
+    rules below leave the ORIGINAL CUDA call intact in the output (plus
+    a warning) — unlike DynamicSharedMemoryRule elsewhere in this file,
+    which replaces its untranslatable construct with a commented-out
+    placeholder. Both are valid "can't fully translate this" strategies,
+    not one being an oversight: an intact, untranslated `__shfl_*_sync`
+    call trips a downstream syntax check loudly (the failure mode this
+    whole gate exists to guarantee), whereas a silently-commented-out
+    declaration does not.
+
+    Also rejects any argument containing a paren: the outer capture
+    regex ([^,\\)]+) excludes ')' by construction, so a parenthesized
+    argument like `(1)` always arrives here as `(1` (dangling open
+    paren, zero close parens) — a shape-only check would accept that as
+    "constant" and splice invalid C. The `count('(') == count(')')`
+    check below isn't really balance-checking (a truly balanced `(1)`
+    can never reach this function intact) — in practice it just rejects
+    any '(' at all, which correctly routes the truncated-paren case to
+    the same safe untranslated+warned path as a real variable reference,
+    instead of emitting broken C silently.
     """
     stripped = expr.strip()
     if not stripped or re.fullmatch(r'[\d\s+\-*/()]+', stripped) is None:

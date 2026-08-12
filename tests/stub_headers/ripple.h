@@ -25,21 +25,22 @@ ripple_block_t ripple_set_block_shape(int pe_id, ...);
 size_t ripple_id(ripple_block_t block_shape, int dim);
 size_t ripple_get_block_size(ripple_block_t block_shape, int dim);
 
-/* Shuffle/reduction: declared for completeness, though every current
- * call site of ripple_shuffle is known-broken (not valid C at all —
- * see GitHub issue #8), so declaring it correctly doesn't make those
- * kernels pass — they fail on the actual invalid syntax at the call
- * site, which is the correct, honest failure. */
+/* Shuffle/reduction: GitHub issue #8 (all 4 shuffle rules emitting
+ * invalid C — lambdas or nested function defs) is fixed as of this
+ * checkout — shuffle calls with a compile-time-constant argument now
+ * hoist a real, named, file-scope function matching this typedef and
+ * compile clean. A variable (non-constant) shuffle argument can't be
+ * threaded through this fixed 2-parameter function-pointer signature
+ * at all, so those calls are deliberately left untranslated with a
+ * warning rather than emitting broken C — tracked separately as
+ * GitHub issue #11, not a defect in this stub or the fix. */
 typedef size_t (*ripple_shuffle_fn_t)(size_t, size_t);
 size_t ripple_shuffle(size_t value, ripple_shuffle_fn_t fn);
 
 /* api.md line 45: TYPE ripple_reduceadd(int dims, TYPE to_reduce) — the
- * first argument is a dimension bitfield, not optional. This stub
- * intentionally matches upstream arity rather than the translator's
- * current 1-arg emission (core/translation_rules.py, warp reduction
- * optimization rule) — that emission mismatch is a real, undiscovered
- * bug of the same class as the shuffle issue above, not something to
- * paper over here. Filed as GitHub issue #10, not fixed here. */
+ * first argument is a dimension bitfield, not optional. GitHub issue
+ * #10 (the translator emitting a 1-arg call, mismatched against this
+ * stub's upstream-accurate arity) is fixed as of this checkout. */
 size_t ripple_reduceadd(int dims, size_t to_reduce);
 
 #endif
