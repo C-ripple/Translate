@@ -10,13 +10,19 @@ the real RIPPLE API surface) run whenever clang is on PATH — see
 tests/compile_verify.py.
 
 warp_reduction.cu is expected to FAIL its syntax check right now —
-GitHub issue #8 tracks that all 4 warp-shuffle translation rules emit
-invalid C (C++ lambdas or a nested function definition). Marked xfail,
-not skipped and not excluded, so: (a) the failure stays visible and
-traceable to the tracked issue rather than silently disappearing from
-the suite, and (b) if issue #8 gets fixed without updating this test,
-pytest reports an unexpected pass (XPASS) — a loud, hard-to-miss signal
-that this xfail marker needs to come off, not a silent status quo.
+GitHub issue #10 tracks that WarpReductionRule emits a ripple_reduceadd
+call with the wrong arity (1 arg, real API takes 2). Note this is NOT
+issue #8 (the warp-shuffle lambda/nested-function bug): this file's
+loop shape gets fully replaced by WarpReductionRule (priority 85)
+before ShuffleDownRule (priority 70) ever sees the __shfl_down_sync
+call, so it never actually exercises issue #8 — that bug currently has
+no coverage in this file. Marked via a declarative xfail marker (not
+an imperative pytest.xfail() call inside the test body, which would
+skip the actual check entirely and defeat the point of this test) with
+strict=True, so: (a) the check genuinely runs and the failure stays
+visible/traceable, and (b) if issue #10 gets fixed without updating
+this marker, pytest reports an unexpected pass as a hard failure (not
+a silent XPASS warning) — a loud signal this marker needs to come off.
 """
 
 import sys
@@ -40,9 +46,26 @@ KERNEL_FILES = [
     "warp_reduction.cu",
 ]
 
-# https://github.com/C-ripple/Translate/issues/8 — all 4 shuffle rules
-# emit invalid C. warp_reduction.cu uses __shfl_down_sync.
-KNOWN_INVALID_SYNTAX = {"warp_reduction.cu"}
+SYNTAX_CHECK_PARAMS = [
+    "ast_flat.cu",
+    "ast_if_no_braces.cu",
+    "atomics_cas_exch.cu",
+    "bitwise_intrinsics.cu",
+    "global_thread_index.cu",
+    pytest.param(
+        "warp_reduction.cu",
+        marks=pytest.mark.xfail(
+            reason=(
+                "ripple_reduceadd arity mismatch, GitHub issue #10 — not "
+                "issue #8: WarpReductionRule (priority 85) fully replaces "
+                "this file's loop before ShuffleDownRule (priority 70) "
+                "ever sees the __shfl_down_sync call, so it never "
+                "exercises the shuffle-lambda bug tracked as issue #8"
+            ),
+            strict=True,
+        ),
+    ),
+]
 
 
 @pytest.mark.parametrize("filename", KERNEL_FILES)
@@ -54,10 +77,8 @@ def test_translates_without_error(filename):
 
 
 @requires_clang
-@pytest.mark.parametrize("filename", KERNEL_FILES)
+@pytest.mark.parametrize("filename", SYNTAX_CHECK_PARAMS)
 def test_translated_output_is_valid_syntax(filename):
-    if filename in KNOWN_INVALID_SYNTAX:
-        pytest.xfail(f"{filename}: known invalid-C output, see GitHub issue #8")
     source = (EXAMPLES_DIR / filename).read_text()
     translated = translate_cuda_source(source)
     success, output = verify_ripple_syntax(translated)

@@ -39,8 +39,7 @@ size_t ripple_shuffle(size_t value, ripple_shuffle_fn_t fn);
  * current 1-arg emission (core/translation_rules.py, warp reduction
  * optimization rule) — that emission mismatch is a real, undiscovered
  * bug of the same class as the shuffle issue above, not something to
- * paper over here. Not fixed as part of this task; flagged for
- * tracking alongside issue #8. */
+ * paper over here. Filed as GitHub issue #10, not fixed here. */
 size_t ripple_reduceadd(int dims, size_t to_reduce);
 
 #endif
