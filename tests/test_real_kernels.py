@@ -9,20 +9,15 @@ Syntax-check assertions (does it actually parse as valid C, against
 the real RIPPLE API surface) run whenever clang is on PATH — see
 tests/compile_verify.py.
 
-warp_reduction.cu is expected to FAIL its syntax check right now —
-GitHub issue #10 tracks that WarpReductionRule emits a ripple_reduceadd
-call with the wrong arity (1 arg, real API takes 2). Note this is NOT
-issue #8 (the warp-shuffle lambda/nested-function bug): this file's
+warp_reduction.cu previously failed its syntax check here — GitHub
+issue #10 tracked that WarpReductionRule emitted a ripple_reduceadd
+call with the wrong arity (1 arg, real API takes 2). That's fixed
+(WarpReductionRule now emits ripple_reduceadd(0b1, val)), so this file
+now passes its syntax check cleanly like the others. Note this file's
 loop shape gets fully replaced by WarpReductionRule (priority 85)
 before ShuffleDownRule (priority 70) ever sees the __shfl_down_sync
-call, so it never actually exercises issue #8 — that bug currently has
-no coverage in this file. Marked via a declarative xfail marker (not
-an imperative pytest.xfail() call inside the test body, which would
-skip the actual check entirely and defeat the point of this test) with
-strict=True, so: (a) the check genuinely runs and the failure stays
-visible/traceable, and (b) if issue #10 gets fixed without updating
-this marker, pytest reports an unexpected pass as a hard failure (not
-a silent XPASS warning) — a loud signal this marker needs to come off.
+call, so it doesn't exercise the separate warp-shuffle lambda bug
+tracked as issue #8 — that bug currently has no coverage in this file.
 """
 
 import sys
@@ -52,19 +47,7 @@ SYNTAX_CHECK_PARAMS = [
     "atomics_cas_exch.cu",
     "bitwise_intrinsics.cu",
     "global_thread_index.cu",
-    pytest.param(
-        "warp_reduction.cu",
-        marks=pytest.mark.xfail(
-            reason=(
-                "ripple_reduceadd arity mismatch, GitHub issue #10 — not "
-                "issue #8: WarpReductionRule (priority 85) fully replaces "
-                "this file's loop before ShuffleDownRule (priority 70) "
-                "ever sees the __shfl_down_sync call, so it never "
-                "exercises the shuffle-lambda bug tracked as issue #8"
-            ),
-            strict=True,
-        ),
-    ),
+    "warp_reduction.cu",
 ]
 
 

@@ -420,9 +420,16 @@ class WarpReductionRule(TranslationRule):
             accum_var = match.group(2)
             
             ctx.add_warning(f"Optimized Warp Reduction loop for '{accum_var}' to 'ripple_reduceadd'")
-            
+
+            # api.md: TYPE ripple_reduceadd(int dims, TYPE to_reduce) — dims
+            # is a bitfield, bit i set = reduce along dimension i. This rule
+            # only matches the classic single-dimension warpSize-halving
+            # reduction (threadIdx.x-shaped), i.e. dimension 0 — hence 0b1,
+            # not an arbitrary placeholder. A multi-dimensional variant of
+            # this pattern, if one is ever added, would need a different
+            # bitfield derived from which dimension(s) it actually reduces.
             return f"""/* CUDA Warp Reduction Loop -> RIPPLE Intrinsic */
-    {accum_var} = ripple_reduceadd({accum_var});"""
+    {accum_var} = ripple_reduceadd(0b1, {accum_var});"""
         
         # Use DOTALL to match across newlines if user formatted code vertically
         return re.sub(self.PATTERN, replace, cuda_code, flags=re.DOTALL)

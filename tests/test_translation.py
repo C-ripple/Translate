@@ -351,6 +351,22 @@ __global__ void reduce(float *g_idata, float *g_odata, unsigned int n) {
         assert not re.search(SharedMemoryRule.PATTERN, result)
         assert "sdata[256]" in result or "sdata" in result
 
+    def test_warp_reduction_emits_correct_reduceadd_arity(self):
+        """WarpReductionRule must emit the 2-arg ripple_reduceadd(dims, val)
+        form per api.md, not the 1-arg form (GitHub issue #10)."""
+        source = """
+__global__ void reduce(float *val) {
+    float sum = *val;
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+    *val = sum;
+}
+"""
+        result = translate_cuda_source(source)
+        assert "ripple_reduceadd(0b1, sum)" in result
+        assert "ripple_reduceadd(sum)" not in result  # the old, wrong 1-arg form
+
 
 # =============================================================================
 # Hexagon-Specific Tests
