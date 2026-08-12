@@ -346,18 +346,92 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
     a loop variable's value into arbitrary nested logic safely is a much
     larger problem than this rule is scoped to solve).
 
-    Only fires when BODY actually references the loop variable inside a
-    shuffle call — an unrelated countable loop is left as a loop, since
-    this is a targeted unblocking mechanism, not a general "unroll every
-    eligible loop" optimization pass.
+    Only fires when BODY contains a shuffle call AND references the loop
+    variable somewhere in the body — an unrelated countable loop is left
+    as a loop, since this is a targeted unblocking mechanism, not a
+    general "unroll every eligible loop" optimization pass. Note this
+    gate is not precise about *where* the variable appears: it doesn't
+    require the variable be an argument of the shuffle call specifically
+    (e.g. it fires even if the variable is only used for array indexing
+    elsewhere in the body, while the shuffle's own argument is a
+    different, unrelated variable). This is deliberately left loose
+    rather than tightened, because it's harmless — the substitution
+    itself is standard unrolling semantics (correct regardless of where
+    in the body the variable appears), and if the shuffle's real
+    argument turns out to still be non-constant after substitution, the
+    shuffle rule underneath still correctly refuses to translate it,
+    just now duplicated once per unrolled iteration instead of once.
+
+    Matches two body shapes via separate patterns tried in sequence
+    (braced first, since it's the common/already-tested case, then
+    braceless as a fallback) rather than one regex trying to do both:
+      for (...) { BODY }          (PATTERN_BRACED)
+      for (...) SINGLE_STATEMENT; (PATTERN_BRACELESS, no braces at all)
+    PATTERN_BRACELESS's negative lookahead (a literal open-brace,
+    negated) makes explicit that it must never match the start of a
+    braced loop (which PATTERN_BRACED should always get first crack
+    at) — belt-and-braces alongside the body-capture `[^;{}]+` already
+    refusing to cross a brace on its own.
+
+    INIT and BOUND each accept a plain integer literal OR the literal
+    token `warpSize` (resolved to 32 — true on every CUDA-capable GPU
+    architecture in practice). This is intentionally narrow: only the
+    exact token `warpSize`, not arbitrary #define'd constants or other
+    CUDA built-ins. STEP is not extended — a step of `warpSize` doesn't
+    fit this rule's multiplicative/additive step semantics and nothing
+    motivating this rule needs it. A `warpSize`-bounded loop that ALSO
+    matches WarpReductionRule's specific down-shuffle+accumulate shape
+    still goes to WarpReductionRule first (priority 85 > 82) — this
+    rule's broader bound syntax doesn't change that ordering.
+
+    PATTERN_BRACELESS's body capture (`[^;{}]+;`) truncates at the
+    FIRST semicolon — correct for an actual single simple statement,
+    but silently wrong for a braceless `if (...) stmt; else stmt2;` (or
+    do/while), where an internal semicolon belongs to the middle of the
+    statement, not its end. Rather than trying to make the regex
+    balance semicolons across control flow (fragile, and the same risk
+    resurfaces for while/do/for/switch), any braceless body starting
+    with a control-flow keyword is bailed out of entirely — see the
+    CONTROL_FLOW_PREFIX check in _replace(), which matches both the
+    spaced (`if (x)`) and unspaced (`if(x)`) spellings — leaving the
+    loop completely untouched rather than risk emitting code that compiles
+    clean but silently drops part of the original statement (e.g. an
+    else-branch surviving on only the last unrolled copy). A braced
+    body has no such risk, since PATTERN_BRACED captures everything up
+    to the loop's own closing brace regardless of internal semicolons,
+    so this check only applies to the braceless path.
     """
 
-    PATTERN = (
-        r'for\s*\(\s*int\s+(\w+)\s*=\s*(\d+)\s*;\s*'
-        r'\1\s*(<=|>=|<|>)\s*(\d+)\s*;\s*'
+    # Matched at the start of a braceless body to bail out on control
+    # flow (see _replace()). `\b` after the keyword group correctly
+    # matches BOTH `if (x)` and the no-space `if(x)` spelling (a word
+    # boundary sits between "if" and "(" either way), while rejecting
+    # identifiers that merely start with a keyword's letters, like
+    # `do_something()` or `iffy_call()` (no boundary between "if"/"do"
+    # and the following word character). A plain whitespace-split
+    # first-token check would miss the no-space spelling entirely and
+    # let the exact bug back in for idiomatic code like `if(cond) ...`.
+    CONTROL_FLOW_PREFIX = re.compile(r'\s*(?:if|while|do|for|switch)\b')
+
+    _LITERAL_OR_WARPSIZE = r'(\d+|warpSize)'
+
+    PATTERN_BRACED = (
+        r'for\s*\(\s*int\s+(\w+)\s*=\s*' + _LITERAL_OR_WARPSIZE + r'\s*;\s*'
+        r'\1\s*(<=|>=|<|>)\s*' + _LITERAL_OR_WARPSIZE + r'\s*;\s*'
         r'\1\s*(\*=|/=|\+=|-=)\s*(\d+)\s*\)\s*'
         r'\{([^{}]*)\}'
     )
+    PATTERN_BRACELESS = (
+        r'for\s*\(\s*int\s+(\w+)\s*=\s*' + _LITERAL_OR_WARPSIZE + r'\s*;\s*'
+        r'\1\s*(<=|>=|<|>)\s*' + _LITERAL_OR_WARPSIZE + r'\s*;\s*'
+        r'\1\s*(\*=|/=|\+=|-=)\s*(\d+)\s*\)\s*'
+        r'(?!\{)([^;{}]+;)'
+    )
+
+    # Alias for whatever the base TranslationRule/dataclass introspects
+    # (e.g. TranslationRule.matches()'s default implementation, which
+    # this class overrides below to check both patterns anyway).
+    PATTERN = PATTERN_BRACED
 
     MAX_ITERATIONS = 64
 
@@ -365,9 +439,21 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
         super().__init__(
             name="unroll_constant_shuffle_loop",
             description="Unroll small compile-time-bounded loops feeding a shuffle intrinsic",
-            cuda_pattern=self.PATTERN,
+            cuda_pattern=self.PATTERN_BRACED,
             priority=82  # below WarpReductionRule (85), above shuffle rules (70)
         )
+
+    def matches(self, cuda_code: str) -> bool:
+        return bool(
+            re.search(self.PATTERN_BRACED, cuda_code)
+            or re.search(self.PATTERN_BRACELESS, cuda_code)
+        )
+
+    @staticmethod
+    def _resolve_literal(token: str) -> int:
+        """Resolves a captured INIT/BOUND token ('warpSize' or a plain
+        integer literal string) to its integer value."""
+        return 32 if token == 'warpSize' else int(token)
 
     @staticmethod
     def _compute_unroll_values(init, cond_op, bound, step_op, step, max_iterations):
@@ -414,46 +500,70 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
 
         return values or None
 
+    def _replace(self, match, ctx: TranslationContext, is_braceless: bool = False) -> str:
+        var_name = match.group(1)
+        init = self._resolve_literal(match.group(2))
+        cond_op = match.group(3)
+        bound = self._resolve_literal(match.group(4))
+        step_op = match.group(5)
+        step = int(match.group(6))
+        body = match.group(7)
+
+        if is_braceless and self.CONTROL_FLOW_PREFIX.match(body):
+            # A braceless body starting with control flow can contain
+            # its own semicolons (if/else, do/while) that this pattern's
+            # single-semicolon truncation can't safely capture — leave
+            # it untouched rather than risk silently dropping part of
+            # the statement. The user would need to wrap it in braces
+            # for this rule to handle it.
+            return match.group(0)
+
+        if not re.search(r'__shfl(?:_(?:down|up|xor))?_sync\s*\(', body):
+            return match.group(0)
+        if not re.search(rf'\b{re.escape(var_name)}\b', body):
+            return match.group(0)
+
+        values = self._compute_unroll_values(
+            init, cond_op, bound, step_op, step, self.MAX_ITERATIONS
+        )
+        if values is None:
+            # Not safely/finitely unrollable — leave the loop as-is.
+            # The shuffle rule underneath will still see the intact
+            # variable reference and correctly refuse to translate it.
+            return match.group(0)
+
+        unrolled_statements = []
+        for v in values:
+            substituted = re.sub(rf'\b{re.escape(var_name)}\b', str(v), body)
+            unrolled_statements.append(substituted.strip())
+
+        ctx.add_warning(
+            f"Unrolled loop over '{var_name}' into {len(values)} "
+            f"iterations ({', '.join(str(v) for v in values)}) to "
+            f"resolve a compile-time-constant shuffle argument"
+        )
+
+        joined = "\n    ".join(unrolled_statements)
+        values_str = ', '.join(str(v) for v in values)
+        return f"/* Unrolled: {var_name} = {values_str} */\n    {joined}"
+
     def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
-        def replace(match):
-            var_name = match.group(1)
-            init = int(match.group(2))
-            cond_op = match.group(3)
-            bound = int(match.group(4))
-            step_op = match.group(5)
-            step = int(match.group(6))
-            body = match.group(7)
-
-            if not re.search(r'__shfl(?:_(?:down|up|xor))?_sync\s*\(', body):
-                return match.group(0)
-            if not re.search(rf'\b{re.escape(var_name)}\b', body):
-                return match.group(0)
-
-            values = self._compute_unroll_values(
-                init, cond_op, bound, step_op, step, self.MAX_ITERATIONS
-            )
-            if values is None:
-                # Not safely/finitely unrollable — leave the loop as-is.
-                # The shuffle rule underneath will still see the intact
-                # variable reference and correctly refuse to translate it.
-                return match.group(0)
-
-            unrolled_statements = []
-            for v in values:
-                substituted = re.sub(rf'\b{re.escape(var_name)}\b', str(v), body)
-                unrolled_statements.append(substituted.strip())
-
-            ctx.add_warning(
-                f"Unrolled loop over '{var_name}' into {len(values)} "
-                f"iterations ({', '.join(str(v) for v in values)}) to "
-                f"resolve a compile-time-constant shuffle argument"
-            )
-
-            joined = "\n    ".join(unrolled_statements)
-            values_str = ', '.join(str(v) for v in values)
-            return f"/* Unrolled: {var_name} = {values_str} */\n    {joined}"
-
-        return re.sub(self.PATTERN, replace, cuda_code, flags=re.DOTALL)
+        # Braced first — it's the common/already-tested case, and once
+        # it consumes a loop's text there's nothing left for the
+        # braceless pattern to accidentally match on that same loop.
+        result = re.sub(
+            self.PATTERN_BRACED,
+            lambda m: self._replace(m, ctx, is_braceless=False),
+            cuda_code,
+            flags=re.DOTALL
+        )
+        result = re.sub(
+            self.PATTERN_BRACELESS,
+            lambda m: self._replace(m, ctx, is_braceless=True),
+            result,
+            flags=re.DOTALL
+        )
+        return result
 
 
 class ShuffleDownRule(TranslationRule):

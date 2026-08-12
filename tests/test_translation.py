@@ -640,7 +640,7 @@ __global__ void sumLoop(int *data) {
 }
 """
     result = translate_cuda_source(source)
-    assert "for (int i = 0; i < 4; i += 1)" in result or "for(int i = 0; i < 4; i += 1)" in result.replace(" ", "").replace("for(", "for (")
+    assert "for (int i = 0; i < 4; i += 1)" in result
 
 
 def test_unroll_does_not_fire_when_warp_reduction_rule_already_owns_the_pattern():
@@ -661,6 +661,121 @@ __global__ void reduce(float *val) {
     result = translate_cuda_source(source)
     assert "ripple_reduceadd(0b1, sum)" in result
     assert "ripple_shuffle(" not in result
+
+
+def test_unroll_braceless_body_resolves_xor_shuffle():
+    # Gap 1: an ordinary braceless single-statement loop body is a
+    # completely idiomatic way to write this same butterfly-reduction
+    # loop — the unroll rule must not require literal {} to fire, or
+    # this common shape is left untranslated (and, post-hard-fail,
+    # crashes) for no reason other than a formatting choice.
+    source = """
+__global__ void butterflyReduce(float *data) {
+    float val = data[threadIdx.x];
+    for (int i = 1; i < 32; i *= 2)
+        val += __shfl_xor_sync(0xffffffff, val, i);
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_xor_sync" not in result
+    assert result.count("ripple_shuffle(") == 5  # i = 1, 2, 4, 8, 16
+    hoisted_bodies = re.findall(r'return k \^ \((\d+)\);', result)
+    assert sorted(int(v) for v in hoisted_bodies) == [1, 2, 4, 8, 16]
+
+
+def test_unroll_warpsize_bound_resolves_xor_shuffle():
+    # Gap 2: warpSize is a real, well-known CUDA built-in that is
+    # always 32 in practice on any CUDA-capable GPU. A loop bounded by
+    # `warpSize` (rather than the digit 32) is completely idiomatic —
+    # it shouldn't be left untranslated just because the bound isn't
+    # spelled as a literal digit, and this shape is neither
+    # WarpReductionRule's exact warpSize/2-init shape nor a plain
+    # digit-bounded loop.
+    source = """
+__global__ void butterflyReduce(float *data) {
+    float val = data[threadIdx.x];
+    for (int i = 1; i < warpSize; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_xor_sync" not in result
+    assert result.count("ripple_shuffle(") == 5  # i = 1, 2, 4, 8, 16 (warpSize=32)
+    hoisted_bodies = re.findall(r'return k \^ \((\d+)\);', result)
+    assert sorted(int(v) for v in hoisted_bodies) == [1, 2, 4, 8, 16]
+
+
+def test_unroll_warpsize_init_resolves_halving_sequence():
+    # Gap 2 continued: warpSize is accepted in the INIT position too,
+    # not just BOUND — a halving-from-warpSize loop is just as
+    # idiomatic as a doubling-toward-warpSize one, and both directions
+    # need to resolve the same symbolic-but-known-constant.
+    source = """
+__global__ void haloExchange(float *data) {
+    float val = data[threadIdx.x];
+    for (int i = warpSize; i > 0; i /= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_xor_sync" not in result
+    assert result.count("ripple_shuffle(") == 6  # i = 32, 16, 8, 4, 2, 1
+    hoisted_bodies = re.findall(r'return k \^ \((\d+)\);', result)
+    assert sorted(int(v) for v in hoisted_bodies) == [1, 2, 4, 8, 16, 32]
+
+
+@pytest.mark.parametrize("if_spelling", ["if (flag[0] < 16)", "if(flag[0] < 16)"])
+def test_unroll_braceless_control_flow_body_left_untouched(if_spelling):
+    # Critical regression guard: PATTERN_BRACELESS's body capture
+    # (`[^;{}]+;`) truncates at the FIRST semicolon. A braceless
+    # if/else has an internal semicolon (ending the if-branch) before
+    # the statement is actually finished, so naively unrolling this
+    # shape corrupts it — confirmed by reproducing the exact reported
+    # bug: only the LAST unrolled copy kept its else-branch, and the
+    # rest silently lost theirs. That's not a syntax error (it still
+    # compiles), it's silently wrong output — worse than leaving it
+    # untranslated, since Task 3's hard-fail can't catch what still
+    # compiles clean. The fix bails out of any braceless body starting
+    # with a control-flow keyword, leaving the loop completely
+    # unmodified — same degrade path as any other "can't safely handle
+    # this shape" case in this rule.
+    #
+    # Parametrized on both the spaced (`if (x)`) and unspaced (`if(x)`)
+    # spellings: a naive whitespace-tokenized "first word is a keyword"
+    # check catches the spaced form but misses `if(...)` entirely (its
+    # first whitespace-delimited token is `if(flag[0]`, not `if`), which
+    # would let the exact same bug back in for equally idiomatic C.
+    source = f"""
+__global__ void kernel(float *val, int *flag) {{
+    for (int i = 1; i < 8; i *= 2)
+        {if_spelling} val[0] += __shfl_xor_sync(0xffffffff, val[0], i); else val[0] -= 1.0f;
+}}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    result = transformer.transform(source)
+
+    # The loop and its if/else body must survive completely intact —
+    # no unrolling, no lost else-branch, no duplication. (The generated
+    # file's own warning-summary header also mentions the intrinsic's
+    # name once in prose, so check the loop body specifically rather
+    # than a bare substring count across the whole file.)
+    assert f"{if_spelling} val[0] += __shfl_xor_sync(0xffffffff, val[0], i); else val[0] -= 1.0f;" in result
+    assert "ripple_shuffle(" not in result
+    assert result.count("for (int i = 1; i < 8; i *= 2)") == 1  # loop kept intact, not unrolled
+
+    # Task 3 (hard-fail) hasn't landed yet: the still-intact 'i'
+    # reference inside the shuffle call goes through the existing
+    # non-constant-argument warning path, same as before this rule
+    # existed at all.
+    assert any(
+        "not a compile-time constant" in w for w in ctx.warnings
+    ), f"expected a compile-time-constant warning, got: {ctx.warnings}"
 
 
 # =============================================================================
