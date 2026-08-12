@@ -17,7 +17,8 @@ from core.semantic_model import (
 )
 from core.translation_rules import (
     TranslationRuleEngine, ThreadIdxRule, BlockDimRule,
-    SharedMemoryRule, AtomicAddRule, infer_block_shape
+    SharedMemoryRule, AtomicAddRule, infer_block_shape,
+    UnrollConstantShuffleLoopRule
 )
 from frontends.source.cuda_frontend import (
     CUDALexer, TokenType, CUDAToRIPPLETransformer, translate_cuda_source
@@ -400,9 +401,9 @@ def test_shuffle_xor_hoists_named_function_not_lambda():
     # local variable — this is deliberate. The hoisted permutation
     # function is file-scope, so it can only safely capture a
     # compile-time-constant-shaped expression; a variable reference here
-    # is the separate untranslated-with-warning case covered by
-    # test_shuffle_with_variable_argument_is_left_untranslated_with_warning
-    # below (GitHub issue #8 follow-up).
+    # is the separate hard-fail case covered by
+    # test_shuffle_with_variable_argument_raises below (GitHub issue #8
+    # follow-up).
     source = """
 __global__ void kernel(int *a) {
     int val = a[0];
@@ -446,13 +447,16 @@ __global__ void kernel(int *a, int *b) {
     assert names[0] != names[1], f"shuffle helper function names collided: {names}"
 
 
-def test_shuffle_with_variable_argument_is_left_untranslated_with_warning():
-    # The hoisted permutation function is file-scope, so it cannot
-    # reference a kernel-local variable like `n` — the old behavior
-    # spliced `n` into the function body verbatim, producing C that
-    # fails to compile ("use of undeclared identifier"). The correct
-    # behavior is to leave the CUDA call untranslated and warn, rather
-    # than emit confusingly-broken output.
+def test_shuffle_with_variable_argument_raises():
+    # A shuffle argument that's a kernel-local variable, and NOT the
+    # induction variable of an unrollable loop (it's a plain local
+    # assigned a runtime-looking value here, not looping at all) — this
+    # is exactly the case UnrollConstantShuffleLoopRule can't help with,
+    # so it must now fail loudly rather than silently leave broken
+    # output. The hoisted permutation function is file-scope, so it
+    # cannot reference a kernel-local variable like `n` — the old
+    # behavior spliced `n` into the function body verbatim, producing C
+    # that fails to compile ("use of undeclared identifier").
     source = """
 __global__ void kernel(int *a, int n) {
     int val = a[0];
@@ -462,13 +466,10 @@ __global__ void kernel(int *a, int n) {
 """
     ctx = TranslationContext()
     transformer = CUDAToRIPPLETransformer(ctx)
-    result = transformer.transform(source)
-    assert "__shfl_xor_sync" in result  # left untranslated, not silently broken
-    assert "ripple_shuffle(" not in result  # and definitely not ALSO translated
-    assert any(
-        "compile-time constant" in w or "not a compile-time constant" in w
-        for w in ctx.warnings
-    ), f"expected a compile-time-constant warning, got: {ctx.warnings}"
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
+    assert ctx.has_errors()
 
 
 def test_shuffle_with_literal_argument_still_hoists_correctly():
@@ -486,7 +487,7 @@ __global__ void kernel(int *a) {
     assert "ripple_shuffle(" in result
 
 
-def test_shuffle_with_parenthesized_constant_argument_left_untranslated_with_warning():
+def test_shuffle_with_parenthesized_constant_argument_raises():
     # Regression guard for a paren-balance bug: the outer capture regex
     # (`[^,\)]+`) truncates at the FIRST `)`, so a perfectly ordinary
     # parenthesized constant like `(1)` arrives at
@@ -495,8 +496,10 @@ def test_shuffle_with_parenthesized_constant_argument_left_untranslated_with_war
     # requirement) would accept that as "constant" and splice the
     # dangling paren into the hoisted function body, producing malformed
     # C ("return k ^ ((1);") with zero warnings. The fix requires
-    # balanced parens, so this must degrade to the same safe
-    # untranslated+warned path as a real variable reference.
+    # balanced parens, so this must degrade to the same hard-fail path
+    # as a real variable reference — the paren-truncation case still
+    # must not silently emit malformed C, now raising instead of
+    # warning-and-continuing.
     source = """
 __global__ void kernel(int *a) {
     int val = a[0];
@@ -506,14 +509,8 @@ __global__ void kernel(int *a) {
 """
     ctx = TranslationContext()
     transformer = CUDAToRIPPLETransformer(ctx)
-    result = transformer.transform(source)
-    assert "__shfl_xor_sync" in result  # left untranslated, not silently broken
-    assert "ripple_shuffle(" not in result
-    assert "((1)" not in result  # the specific malformed-paren splice must not appear
-    assert any(
-        "compile-time constant" in w or "not a compile-time constant" in w
-        for w in ctx.warnings
-    ), f"expected a compile-time-constant warning, got: {ctx.warnings}"
+    with pytest.raises(TranslationError):
+        transformer.transform(source)
 
 
 @pytest.mark.parametrize("intrinsic", [
@@ -522,7 +519,7 @@ __global__ void kernel(int *a) {
     "__shfl_sync(0xffffffff, val, {arg})",
     "__shfl_down_sync(0xffffffff, val, {arg})",
 ])
-def test_shuffle_variable_argument_left_untranslated_across_all_rules(intrinsic):
+def test_shuffle_variable_argument_raises_across_all_rules(intrinsic):
     # All 4 shuffle rules share the same (hand-copied, not shared-function)
     # gating pattern. Prove each one actually gates, not just ShuffleXorRule
     # — a future edit to one rule could silently diverge from the others
@@ -537,12 +534,9 @@ __global__ void kernel(int *a, int n) {{
 """
     ctx = TranslationContext()
     transformer = CUDAToRIPPLETransformer(ctx)
-    result = transformer.transform(source)
-    assert call in result  # left untranslated
-    assert "ripple_shuffle(" not in result
-    assert any("compile-time constant" in w for w in ctx.warnings), (
-        f"expected a compile-time-constant warning, got: {ctx.warnings}"
-    )
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
 
 
 @pytest.mark.parametrize("intrinsic", [
@@ -763,12 +757,16 @@ def test_unroll_braceless_control_flow_body_left_untouched(statement):
     # shape corrupts it — confirmed by reproducing the exact reported
     # bug: only the LAST unrolled copy kept its else-branch, and the
     # rest silently lost theirs. That's not a syntax error (it still
-    # compiles), it's silently wrong output — worse than leaving it
-    # untranslated, since Task 3's hard-fail can't catch what still
-    # compiles clean. The fix bails out of any braceless body starting
-    # with a control-flow keyword, leaving the loop completely
-    # unmodified — same degrade path as any other "can't safely handle
-    # this shape" case in this rule.
+    # compiles), it's silently wrong output. The fix bails out of any
+    # braceless body starting with a control-flow keyword, leaving the
+    # loop completely unmodified — same degrade path as any other
+    # "can't safely handle this shape" case in this rule. Since 'i'
+    # then survives untouched into ShuffleXorRule, and 'i' is not a
+    # compile-time constant, Task 3's hard-fail is exactly what proves
+    # the bail-out happened correctly here: a raise naming 'i' means
+    # the loop var reached the shuffle rule unmodified, not spliced in
+    # as a (corrupted) literal. A corrupted unroll would have consumed
+    # 'i' and NOT raised — so the raise is the regression guard now.
     #
     # Parametrized across all 5 keywords CONTROL_FLOW_PREFIX guards
     # against (if/while/do/for/switch), plus both the spaced (`if (x)`)
@@ -785,13 +783,14 @@ __global__ void kernel(float *val, int *flag) {{
 """
     ctx = TranslationContext()
     transformer = CUDAToRIPPLETransformer(ctx)
-    result = transformer.transform(source)
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
 
-    # The loop and its body must survive completely intact — no
-    # unrolling, no lost branches, no duplication.
-    assert statement in result
-    assert "ripple_shuffle(" not in result
-    assert result.count("for (int i = 1; i < 8; i *= 2)") == 1  # loop kept intact, not unrolled
+    # The raise must come from the shuffle rule rejecting the still-intact
+    # loop variable 'i' — proof the loop was left completely unmodified,
+    # not corrupted by a partial unroll.
+    assert "not a compile-time constant" in str(exc_info.value)
+    assert "'i'" in str(exc_info.value)
 
 
 def test_unroll_braceless_body_starting_with_keyword_like_identifier_still_unrolls():
@@ -829,10 +828,15 @@ def test_unroll_braced_body_with_string_literal_left_untouched():
     # entirely. That's structural corruption of the whole rest of the
     # file, and it was invisible to every safety mechanism: ctx.errors
     # stayed empty, and only the benign "Unrolled loop..." success
-    # warning fired — transform() returned normally, so even Task 3's
-    # eventual hard-fail wouldn't have caught it. The fix bails out on
-    # any quote character anywhere in the captured body, for both
-    # braced and braceless bodies.
+    # warning fired — transform() returned normally. The fix bails out
+    # on any quote character anywhere in the captured body, for both
+    # braced and braceless bodies. The structural checks below run the
+    # unroll rule in isolation to prove the bail-out (not a corrupted
+    # unroll) — a corrupted unroll would consume 'i', so as a second,
+    # pipeline-level check, the full transform() must now raise
+    # TranslationError (Task 3's hard-fail) naming the still-intact 'i',
+    # since a bailed-out loop leaves a genuinely untranslatable
+    # variable-argument shuffle behind.
     source = """
 __global__ void kernel(float *val_ptr) {
     float val = *val_ptr;
@@ -844,8 +848,7 @@ __global__ void kernel(float *val_ptr) {
 }
 """
     ctx = TranslationContext()
-    transformer = CUDAToRIPPLETransformer(ctx)
-    result = transformer.transform(source)
+    result = UnrollConstantShuffleLoopRule().apply(source, ctx)
 
     # The loop, including the string literal containing a brace, must
     # survive completely intact — no unrolling attempted at all.
@@ -863,6 +866,13 @@ __global__ void kernel(float *val_ptr) {
     # the whole loop, string literal included, was left in its
     # original position rather than truncated and reordered.
     assert result.index('printf("}");') < result.index("*val_ptr = val;")
+
+    # Pipeline level: the untouched 'i' now reaches ShuffleXorRule,
+    # which can't resolve it — the full transform must hard-fail.
+    transformer = CUDAToRIPPLETransformer(TranslationContext())
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
 
 
 def test_unroll_braceless_body_with_string_literal_left_untouched():
@@ -883,13 +893,21 @@ __global__ void kernel(float *val_ptr) {
 }
 """
     ctx = TranslationContext()
-    transformer = CUDAToRIPPLETransformer(ctx)
-    result = transformer.transform(source)
+    result = UnrollConstantShuffleLoopRule().apply(source, ctx)
 
     assert 'strlen(";")' in result
     assert "ripple_shuffle(" not in result
     assert ctx.errors == []
     assert "*val_ptr = val;\n}" in result
+
+    # Pipeline level: the untouched 'i' now reaches ShuffleXorRule,
+    # which can't resolve it — the full transform must hard-fail (Task
+    # 3), proving this was a genuine bail-out rather than a corrupted
+    # unroll that silently consumed 'i'.
+    transformer = CUDAToRIPPLETransformer(TranslationContext())
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
 
 
 def test_unroll_braceless_body_with_comment_left_untouched():
@@ -917,13 +935,21 @@ __global__ void kernel(float *val_ptr) {
 }
 """
     ctx = TranslationContext()
-    transformer = CUDAToRIPPLETransformer(ctx)
-    result = transformer.transform(source)
+    result = UnrollConstantShuffleLoopRule().apply(source, ctx)
 
     assert "/* note */" in result
     assert "ripple_shuffle(" not in result
     assert ctx.errors == []
     assert "*val_ptr = val;\n}" in result
+
+    # Pipeline level: the untouched 'i' now reaches ShuffleXorRule,
+    # which can't resolve it — the full transform must hard-fail (Task
+    # 3), proving this was a genuine bail-out rather than a corrupted
+    # unroll that silently consumed 'i'.
+    transformer = CUDAToRIPPLETransformer(TranslationContext())
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
 
 
 def test_unroll_braced_body_with_block_comment_left_untouched():
@@ -950,8 +976,7 @@ __global__ void kernel(float *val_ptr) {
 }
 """
     ctx = TranslationContext()
-    transformer = CUDAToRIPPLETransformer(ctx)
-    result = transformer.transform(source)
+    result = UnrollConstantShuffleLoopRule().apply(source, ctx)
 
     assert "/* note [3] } */" in result
     assert "ripple_shuffle(" not in result
@@ -961,6 +986,15 @@ __global__ void kernel(float *val_ptr) {
     # brace — not floating outside it.
     assert "*val_ptr = val;\n}" in result
     assert result.index("/* note [3] } */") < result.index("*val_ptr = val;")
+
+    # Pipeline level: the untouched 'i' now reaches ShuffleXorRule,
+    # which can't resolve it — the full transform must hard-fail (Task
+    # 3), proving this was a genuine bail-out rather than a corrupted
+    # unroll that silently consumed 'i'.
+    transformer = CUDAToRIPPLETransformer(TranslationContext())
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
 
 
 def test_unroll_braced_body_with_line_comment_left_untouched():
@@ -979,13 +1013,21 @@ __global__ void kernel(float *val_ptr) {
 }
 """
     ctx = TranslationContext()
-    transformer = CUDAToRIPPLETransformer(ctx)
-    result = transformer.transform(source)
+    result = UnrollConstantShuffleLoopRule().apply(source, ctx)
 
     assert "// note [3] }" in result
     assert "ripple_shuffle(" not in result
     assert ctx.errors == []
     assert "*val_ptr = val;\n}" in result
+
+    # Pipeline level: the untouched 'i' now reaches ShuffleXorRule,
+    # which can't resolve it — the full transform must hard-fail (Task
+    # 3), proving this was a genuine bail-out rather than a corrupted
+    # unroll that silently consumed 'i'.
+    transformer = CUDAToRIPPLETransformer(TranslationContext())
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
     assert result.index("// note [3] }") < result.index("*val_ptr = val;")
 
 

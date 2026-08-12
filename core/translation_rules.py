@@ -595,11 +595,15 @@ class ShuffleDownRule(TranslationRule):
             # variable (e.g. a loop counter) isn't in scope there — only a
             # compile-time-constant-shaped expression is safe to splice in.
             if not _is_compile_time_constant_expr(delta):
-                ctx.add_warning(
-                    f"ShuffleDownRule: left __shfl_down_sync(...) untranslated — "
+                ctx.add_error(
+                    f"ShuffleDownRule: cannot translate __shfl_down_sync(...) — "
                     f"delta '{delta}' is not a compile-time constant. "
                     f"ripple_shuffle's permutation function is file-scope and "
-                    f"cannot reference kernel-local variables like '{delta}'."
+                    f"cannot reference kernel-local variables like '{delta}'. "
+                    f"If '{delta}' is a small, compile-time-bounded loop variable, "
+                    f"see GitHub issue #11 for what's supported "
+                    f"(UnrollConstantShuffleLoopRule); otherwise this shuffle "
+                    f"cannot currently be translated."
                 )
                 return match.group(0)
 
@@ -645,11 +649,15 @@ class ShuffleXorRule(TranslationRule):
             # variable isn't in scope there — only a compile-time-constant-
             # shaped expression is safe to splice in.
             if not _is_compile_time_constant_expr(lane_mask):
-                ctx.add_warning(
-                    f"ShuffleXorRule: left __shfl_xor_sync(...) untranslated — "
+                ctx.add_error(
+                    f"ShuffleXorRule: cannot translate __shfl_xor_sync(...) — "
                     f"lane_mask '{lane_mask}' is not a compile-time constant. "
                     f"ripple_shuffle's permutation function is file-scope and "
-                    f"cannot reference kernel-local variables like '{lane_mask}'."
+                    f"cannot reference kernel-local variables like '{lane_mask}'. "
+                    f"If '{lane_mask}' is a small, compile-time-bounded loop "
+                    f"variable, see GitHub issue #11 for what's supported "
+                    f"(UnrollConstantShuffleLoopRule); otherwise this shuffle "
+                    f"cannot currently be translated."
                 )
                 return match.group(0)
 
@@ -693,11 +701,15 @@ class ShuffleUpRule(TranslationRule):
             # variable isn't in scope there — only a compile-time-constant-
             # shaped expression is safe to splice in.
             if not _is_compile_time_constant_expr(delta):
-                ctx.add_warning(
-                    f"ShuffleUpRule: left __shfl_up_sync(...) untranslated — "
+                ctx.add_error(
+                    f"ShuffleUpRule: cannot translate __shfl_up_sync(...) — "
                     f"delta '{delta}' is not a compile-time constant. "
                     f"ripple_shuffle's permutation function is file-scope and "
-                    f"cannot reference kernel-local variables like '{delta}'."
+                    f"cannot reference kernel-local variables like '{delta}'. "
+                    f"If '{delta}' is a small, compile-time-bounded loop variable, "
+                    f"see GitHub issue #11 for what's supported "
+                    f"(UnrollConstantShuffleLoopRule); otherwise this shuffle "
+                    f"cannot currently be translated."
                 )
                 return match.group(0)
 
@@ -736,11 +748,15 @@ class ShuffleSyncRule(TranslationRule):
             # variable isn't in scope there — only a compile-time-constant-
             # shaped expression is safe to splice in.
             if not _is_compile_time_constant_expr(src_lane):
-                ctx.add_warning(
-                    f"ShuffleSyncRule: left __shfl_sync(...) untranslated — "
+                ctx.add_error(
+                    f"ShuffleSyncRule: cannot translate __shfl_sync(...) — "
                     f"src_lane '{src_lane}' is not a compile-time constant. "
                     f"ripple_shuffle's permutation function is file-scope and "
-                    f"cannot reference kernel-local variables like '{src_lane}'."
+                    f"cannot reference kernel-local variables like '{src_lane}'. "
+                    f"If '{src_lane}' is a small, compile-time-bounded loop "
+                    f"variable, see GitHub issue #11 for what's supported "
+                    f"(UnrollConstantShuffleLoopRule); otherwise this shuffle "
+                    f"cannot currently be translated."
                 )
                 return match.group(0)
 
