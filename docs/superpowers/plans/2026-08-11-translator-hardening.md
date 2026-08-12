@@ -855,6 +855,8 @@ grep that nothing else in the repo referenced the old paths."
 
 Create `tests/test_real_kernels.py`:
 
+**Revision note (post-review):** the version below is corrected from what was originally executed. The first version used an *imperative* `pytest.xfail()` call inside the test body for `warp_reduction.cu` — which raises immediately, so the actual `verify_ripple_syntax()` check never ran at all, silently defeating the test's own stated purpose. Worse, tracing what the check *would* have found revealed it wasn't issue #8 in the first place: `WarpReductionRule` (priority 85) fully replaces this file's loop — including its `__shfl_down_sync` call — with a `ripple_reduceadd()` call before `ShuffleDownRule` (priority 70) ever runs, so this file actually reproduces issue #10 (`ripple_reduceadd` arity mismatch), not issue #8 (shuffle lambdas). Issue #8 currently has no coverage anywhere in this test suite. Both mistakes are corrected below (declarative `xfail` with `strict=True`, correct issue attribution) — this is what actually shipped.
+
 ```python
 """
 Translation + real-syntax-check tests against the sample kernels in
@@ -868,13 +870,19 @@ the real RIPPLE API surface) run whenever clang is on PATH — see
 tests/compile_verify.py.
 
 warp_reduction.cu is expected to FAIL its syntax check right now —
-GitHub issue #8 tracks that all 4 warp-shuffle translation rules emit
-invalid C (C++ lambdas or a nested function definition). Marked xfail,
-not skipped and not excluded, so: (a) the failure stays visible and
-traceable to the tracked issue rather than silently disappearing from
-the suite, and (b) if issue #8 gets fixed without updating this test,
-pytest reports an unexpected pass (XPASS) — a loud, hard-to-miss signal
-that this xfail marker needs to come off, not a silent status quo.
+GitHub issue #10 tracks that WarpReductionRule emits a ripple_reduceadd
+call with the wrong arity (1 arg, real API takes 2). Note this is NOT
+issue #8 (the warp-shuffle lambda/nested-function bug): this file's
+loop shape gets fully replaced by WarpReductionRule (priority 85)
+before ShuffleDownRule (priority 70) ever sees the __shfl_down_sync
+call, so it never actually exercises issue #8 — that bug currently has
+no coverage in this file. Marked via a declarative xfail marker (not
+an imperative pytest.xfail() call inside the test body, which would
+skip the actual check entirely and defeat the point of this test) with
+strict=True, so: (a) the check genuinely runs and the failure stays
+visible/traceable, and (b) if issue #10 gets fixed without updating
+this marker, pytest reports an unexpected pass as a hard failure (not
+a silent XPASS warning) — a loud signal this marker needs to come off.
 """
 
 import sys
@@ -898,9 +906,26 @@ KERNEL_FILES = [
     "warp_reduction.cu",
 ]
 
-# https://github.com/C-ripple/Translate/issues/8 — all 4 shuffle rules
-# emit invalid C. warp_reduction.cu uses __shfl_down_sync.
-KNOWN_INVALID_SYNTAX = {"warp_reduction.cu"}
+SYNTAX_CHECK_PARAMS = [
+    "ast_flat.cu",
+    "ast_if_no_braces.cu",
+    "atomics_cas_exch.cu",
+    "bitwise_intrinsics.cu",
+    "global_thread_index.cu",
+    pytest.param(
+        "warp_reduction.cu",
+        marks=pytest.mark.xfail(
+            reason=(
+                "ripple_reduceadd arity mismatch, GitHub issue #10 — not "
+                "issue #8: WarpReductionRule (priority 85) fully replaces "
+                "this file's loop before ShuffleDownRule (priority 70) "
+                "ever sees the __shfl_down_sync call, so it never "
+                "exercises the shuffle-lambda bug tracked as issue #8"
+            ),
+            strict=True,
+        ),
+    ),
+]
 
 
 @pytest.mark.parametrize("filename", KERNEL_FILES)
@@ -912,10 +937,8 @@ def test_translates_without_error(filename):
 
 
 @requires_clang
-@pytest.mark.parametrize("filename", KERNEL_FILES)
+@pytest.mark.parametrize("filename", SYNTAX_CHECK_PARAMS)
 def test_translated_output_is_valid_syntax(filename):
-    if filename in KNOWN_INVALID_SYNTAX:
-        pytest.xfail(f"{filename}: known invalid-C output, see GitHub issue #8")
     source = (EXAMPLES_DIR / filename).read_text()
     translated = translate_cuda_source(source)
     success, output = verify_ripple_syntax(translated)
@@ -932,8 +955,8 @@ Expected: 6 passed. If any fail, that's a real, previously-hidden translation ga
 
 - [ ] **Step 3: Run the syntax-check tests**
 
-Run: `source venv/bin/activate && python -m pytest tests/test_real_kernels.py -v -k "syntax"`
-Expected: 5 passed, 1 xfailed (`warp_reduction.cu`, per issue #8). Any *other* failure among the 5 expected-to-pass kernels is a real, previously-hidden translation-correctness bug — same instruction as Step 2, fix the rule (or if it's a stub-header gap, fix `tests/stub_headers/ripple.h`), don't weaken the test. If `warp_reduction.cu` unexpectedly passes (XPASS), issue #8 has apparently already been fixed elsewhere — remove it from `KNOWN_INVALID_SYNTAX` rather than leaving a stale xfail marker.
+Run: `source venv/bin/activate && python -m pytest tests/test_real_kernels.py -v -rxs -k "syntax"`
+Expected: 5 passed, 1 xfailed (`warp_reduction.cu`, per issue #10 — check the `-rxs` short summary shows the corrected reason text). Any *other* failure among the 5 expected-to-pass kernels is a real, previously-hidden translation-correctness bug — same instruction as Step 2, fix the rule (or if it's a stub-header gap, fix `tests/stub_headers/ripple.h`), don't weaken the test. Because `strict=True`, an unexpected pass on `warp_reduction.cu` reports as a hard FAILED (not a quiet XPASS) — if that happens, issue #10 has apparently already been fixed elsewhere; update `SYNTAX_CHECK_PARAMS` to drop the xfail mark rather than leaving it stale.
 Expected (clang not on PATH): all syntax-check tests skipped
 
 - [ ] **Step 4: Run the full suite**
@@ -957,10 +980,13 @@ tests in test_translation.py and test_complex_kernels.py wouldn't
 catch — nested control flow, two atomics in one kernel, warp shuffle
 inside a loop.
 
-warp_reduction.cu is marked xfail, not excluded — its known-invalid
-shuffle output (GitHub issue #8) stays visible and traceable in the
-suite, and flips to a loud XPASS if that issue is ever fixed without
-updating this test."
+warp_reduction.cu is marked xfail (declarative, strict=True — not
+excluded and not an imperative pytest.xfail() call, which would skip
+the check entirely). Its actual failure is issue #10 (ripple_reduceadd
+arity), not issue #8 (shuffle lambdas) — this file's loop is fully
+replaced by WarpReductionRule before the shuffle rules ever run, so
+issue #8 has no coverage here. The marker flips to a hard failure, not
+a silent XPASS, if issue #10 is ever fixed without updating it."
 ```
 
 ---
@@ -970,7 +996,7 @@ updating this test."
 **Spec coverage:**
 - "Fix the AST parser's infinite loop and wire it into the source-level translator as a structural safety net" → Priority 1, Tasks 1-3. ✓ (executed; grew to include 4 additional hang-guard fixes and a real-attribute-parsing fix found during review — see git history on `translator-hardening`)
 - "Stand up compile verification" → revised mid-execution from a full Hexagon toolchain build to a lightweight clang syntax check, Priority 2, Tasks 4-6, after determining the heavy version was disproportionate to what the project has actually needed so far (see the Priority 2 revision note). Task 4 (vendoring) still done and kept for later. Two real translator bugs found while scoping this (`ripple_get_size`, Task 5; warp-shuffle invalid-C output, deferred to GitHub issue #8) were bugs in the codebase, not gaps in this plan's coverage. ✓
-- "Rebuild the test corpus around real kernels, validated through the compile step" → Priority 3, Tasks 7-8, using the revised lightweight helper; `warp_reduction.cu` explicitly `xfail`s per issue #8 rather than being silently excluded. ✓
+- "Rebuild the test corpus around real kernels, validated through the compile step" → Priority 3, Tasks 7-8, using the revised lightweight helper; `warp_reduction.cu` explicitly `xfail`s (declarative, strict) rather than being silently excluded — its actual failure turned out to be issue #10, not the originally-assumed issue #8, corrected after review caught that an imperative `pytest.xfail()` was skipping the check entirely. Issue #8 (the shuffle-lambda bug) has no test coverage in this suite as of this plan's execution — `tests/examples/cuda_kernels.cu`'s raw-shuffle kernels were identified as a way to close that gap but weren't added as part of this plan. ✓
 
 **Placeholder scan:** No TBD/TODO/"add appropriate handling" phrasing anywhere above; every code step is complete, runnable code; every "Run:" step has a concrete command and expected output.
 
