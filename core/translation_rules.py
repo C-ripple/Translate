@@ -293,19 +293,24 @@ def _is_compile_time_constant_expr(expr: str) -> bool:
     (non-constant) shuffle arguments are a known, deliberate gap tracked
     as GitHub issue #11 — ripple_shuffle's function-pointer signature is
     fixed at exactly (k, block_size), so there's no clean way to thread
-    an arbitrary runtime value through it; this function exists to
-    detect that case and hand it off to the safe degrade-and-warn path
-    below, not to solve it.
+    an arbitrary runtime value through it. UnrollConstantShuffleLoopRule
+    resolves the common case (a small, compile-time-bounded loop
+    variable) before any shuffle rule ever sees it; this function exists
+    to detect what's left over — genuinely unresolvable arguments — and
+    hand them off to the hard-fail path below, not to solve them.
 
     Deliberate convention note: on a non-constant argument, the shuffle
-    rules below leave the ORIGINAL CUDA call intact in the output (plus
-    a warning) — unlike DynamicSharedMemoryRule elsewhere in this file,
-    which replaces its untranslatable construct with a commented-out
-    placeholder. Both are valid "can't fully translate this" strategies,
-    not one being an oversight: an intact, untranslated `__shfl_*_sync`
-    call trips a downstream syntax check loudly (the failure mode this
-    whole gate exists to guarantee), whereas a silently-commented-out
-    declaration does not.
+    rules below call ctx.add_error(...) and return the ORIGINAL CUDA
+    call unmodified — ctx.add_error() makes transform() raise
+    TranslationError once all rules have run, so no output file is ever
+    written for a kernel containing an unresolvable shuffle. This is
+    unlike DynamicSharedMemoryRule elsewhere in this file, which
+    replaces its untranslatable construct with a commented-out
+    placeholder and only warns. Both are valid strategies for their
+    respective cases, not one being an oversight: a silently-degraded
+    shuffle would compile into wrong (or non-compiling) code with only
+    an easy-to-miss warning as the signal, which is worse than failing
+    the whole translation loudly.
 
     Also rejects any argument containing a paren: the outer capture
     regex ([^,\\)]+) excludes ')' by construction, so a parenthesized
@@ -315,8 +320,8 @@ def _is_compile_time_constant_expr(expr: str) -> bool:
     check below isn't really balance-checking (a truly balanced `(1)`
     can never reach this function intact) — in practice it just rejects
     any '(' at all, which correctly routes the truncated-paren case to
-    the same safe untranslated+warned path as a real variable reference,
-    instead of emitting broken C silently.
+    the same hard-fail path as a real variable reference, instead of
+    emitting broken C silently.
     """
     stripped = expr.strip()
     if not stripped or re.fullmatch(r'[\d\s+\-*/()]+', stripped) is None:

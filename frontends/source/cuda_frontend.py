@@ -486,8 +486,14 @@ class CUDAToRIPPLETransformer:
     def transform(self, cuda_source: str) -> str:
         """
         Transform CUDA source to RIPPLE C.
-        
+
         Returns the transformed source code.
+
+        Raises:
+            TranslationError: if any rule recorded an error via
+                ctx.add_error() (e.g. a shuffle argument that isn't a
+                compile-time constant and isn't the induction variable
+                of a loop UnrollConstantShuffleLoopRule can unroll).
         """
         # AST pre-pass: structural validation and kernel detection.
         # This does not drive code generation — it exists to catch malformed
