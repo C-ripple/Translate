@@ -559,16 +559,22 @@ __global__ void kernel(int *a) {{
 
 
 def test_unroll_doubling_loop_resolves_xor_shuffle():
-    # The exact butterfly-reduction example demonstrated in conversation:
     # i doubles from 1 to 16 (5 iterations), feeding __shfl_xor_sync's
     # lane_mask argument — previously left untranslated with a warning,
     # since 'i' is a kernel-local loop variable, not a compile-time
     # constant, from the shuffle rule's point of view in isolation.
+    # Mask is deliberately non-full (0x0000ffff, not 0xffffffff): the
+    # full-mask, bound-32 variant of this exact shape is now owned by
+    # ButterflyAllReduceRule (see test_butterfly_allreduce_* below),
+    # which fires first and replaces it with a single ripple_reduceadd
+    # call instead of unrolling. Using a non-full mask here keeps this
+    # test actually exercising UnrollConstantShuffleLoopRule's digit-32
+    # bound handling rather than colliding with that higher-priority rule.
     source = """
 __global__ void butterflyReduce(float *data) {
     float val = data[threadIdx.x];
     for (int i = 1; i < 32; i *= 2) {
-        val += __shfl_xor_sync(0xffffffff, val, i);
+        val += __shfl_xor_sync(0x0000ffff, val, i);
     }
     data[threadIdx.x] = val;
 }
@@ -686,11 +692,18 @@ def test_unroll_warpsize_bound_resolves_xor_shuffle():
     # spelled as a literal digit, and this shape is neither
     # WarpReductionRule's exact warpSize/2-init shape nor a plain
     # digit-bounded loop.
+    # Mask is deliberately non-full (0xffff0000, not 0xffffffff): the
+    # full-mask, warpSize-bound variant of this exact shape is now owned
+    # by ButterflyAllReduceRule (see test_butterfly_allreduce_* below),
+    # which fires first and replaces it with a single ripple_reduceadd
+    # call instead of unrolling. Using a non-full mask here keeps this
+    # test actually exercising UnrollConstantShuffleLoopRule's warpSize
+    # bound handling rather than colliding with that higher-priority rule.
     source = """
 __global__ void butterflyReduce(float *data) {
     float val = data[threadIdx.x];
     for (int i = 1; i < warpSize; i *= 2) {
-        val += __shfl_xor_sync(0xffffffff, val, i);
+        val += __shfl_xor_sync(0xffff0000, val, i);
     }
     data[threadIdx.x] = val;
 }
@@ -1058,6 +1071,117 @@ def test_transform_raises_with_all_errors_when_ctx_has_multiple():
     ]
     assert "first synthetic test error" in str(exc_info.value)
     assert "second synthetic test error" in str(exc_info.value)
+
+
+def test_butterfly_allreduce_recognized_as_single_reduceadd():
+    # The exact motivating example: a full-warp (32-lane) XOR-butterfly
+    # all-reduce with a full mask should now translate to ONE
+    # ripple_reduceadd call instead of being unrolled into 5 separate
+    # ripple_shuffle calls — better output for a pattern RIPPLE has a
+    # native intrinsic for, matching WarpReductionRule's existing
+    # idiom for the shfl_down-halving variant of the same idea.
+    source = """
+__global__ void butterflyReduce(float *data) {
+    float val = data[threadIdx.x];
+    for (int i = 1; i < 32; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "ripple_reduceadd(0b1, val)" in result
+    assert "ripple_shuffle(" not in result
+    assert "__shfl_xor_sync" not in result
+
+
+def test_butterfly_allreduce_fires_on_real_fixture():
+    # The real fixture already shipped in tests/examples/ — proves this
+    # isn't only working on a synthetic example.
+    source = (Path(__file__).parent / "examples" / "butterfly_reduction.cu").read_text()
+    result = translate_cuda_source(source)
+    assert "ripple_reduceadd(0b1, val)" in result
+    assert "ripple_shuffle(" not in result
+
+
+def test_butterfly_allreduce_accepts_symbolic_warpsize_bound():
+    # Real CUDA code commonly writes the bound symbolically rather than
+    # hardcoding 32 — must be recognized the same way.
+    source = """
+__global__ void butterflyReduce(float *data) {
+    float val = data[threadIdx.x];
+    for (int i = 1; i < warpSize; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "ripple_reduceadd(0b1, val)" in result
+    assert "ripple_shuffle(" not in result
+
+
+def test_butterfly_allreduce_does_not_fire_on_partial_width_loop():
+    # CRITICAL correctness guard: a loop bounded to fewer than the full
+    # warp (here, 8 lanes) is a segmented/sub-group reduction, NOT a
+    # whole-block all-reduce. ripple_reduceadd(0b1, ...) always reduces
+    # across the entire dimension, so firing here would silently change
+    # the kernel's meaning (every lane would get the sum of all 32
+    # lanes instead of just its own group of 8). Must fall through to
+    # UnrollConstantShuffleLoopRule instead, which unrolls it correctly
+    # (3 iterations: i = 1, 2, 4) without attaching any
+    # reduction-specific meaning to the loop.
+    source = """
+__global__ void segmentedReduce(float *data) {
+    float val = data[threadIdx.x];
+    for (int i = 1; i < 8; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "ripple_reduceadd" not in result
+    assert result.count("ripple_shuffle(") == 3  # i = 1, 2, 4
+
+
+def test_butterfly_allreduce_does_not_fire_on_non_full_mask():
+    # CRITICAL correctness guard: a non-full mask means not every lane
+    # participates in the shuffle, so this is not provably a whole-warp
+    # all-reduce even though the loop shape otherwise matches exactly.
+    # Must fall through to UnrollConstantShuffleLoopRule rather than
+    # assume full participation.
+    source = """
+__global__ void partialMaskReduce(float *data) {
+    float val = data[threadIdx.x];
+    for (int i = 1; i < 32; i *= 2) {
+        val += __shfl_xor_sync(0x0000ffff, val, i);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "ripple_reduceadd" not in result
+    assert result.count("ripple_shuffle(") == 5  # i = 1, 2, 4, 8, 16
+
+
+def test_butterfly_allreduce_does_not_collide_with_warp_reduction_rule():
+    # Regression guard: the classic warpSize/2 + shfl_down + accumulate
+    # shape must still go through WarpReductionRule unchanged — the two
+    # rules match mutually exclusive loop shapes (init=1-doubling+xor
+    # vs init=warpSize/2-halving+down), so there should be no overlap.
+    source = """
+__global__ void reduce(float *val) {
+    float sum = *val;
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+    *val = sum;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "ripple_reduceadd(0b1, sum)" in result
+    assert "ripple_shuffle(" not in result
 
 
 # =============================================================================

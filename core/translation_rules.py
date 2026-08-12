@@ -822,6 +822,92 @@ class WarpReductionRule(TranslationRule):
         return re.sub(self.PATTERN, replace, cuda_code, flags=re.DOTALL)
 
 
+class ButterflyAllReduceRule(TranslationRule):
+    """
+    Recognizes the classic full-warp XOR-butterfly all-reduce loop and
+    replaces it with a single ripple_reduceadd call, the same
+    optimization WarpReductionRule already applies to the shfl_down-
+    halving-reduction variant of this same idea (see that class's
+    docstring). Both patterns compute a whole-warp reduction; this one
+    additionally leaves every lane holding the total (an all-reduce),
+    which is exactly what ripple_reduceadd's documented auto-broadcast-
+    on-reassignment semantics already produce for free (api.md: "automatic
+    broadcast promotes lower-dimensional blocks... to higher-dimensional
+    ones") — no explicit ripple_broadcast call is needed.
+
+    Matches only:
+      for (int VAR = 1; VAR < BOUND; VAR *= 2) { ACCUM += __shfl_xor_sync(MASK, ACCUM, VAR); }
+    where BOUND is the literal `32` or the symbolic token `warpSize`
+    (mirroring WarpReductionRule's existing assumption that `warpSize`
+    always means "the whole warp, dimension 0"), and MASK must be
+    exactly the literal full mask `0xffffffff` (case-insensitive).
+
+    Both constraints are deliberate correctness guards, not style
+    preferences:
+      - A BOUND smaller than the full warp (e.g. `i < 8`) is a
+        segmented/sub-group reduction. ripple_reduceadd(0b1, ...)
+        always reduces across the ENTIRE dimension, so firing here
+        would silently change the kernel's meaning — every lane would
+        get the sum of all 32 lanes instead of just its own group.
+      - A non-full MASK means not every lane participates in the
+        shuffle, so the loop shape alone doesn't prove this is a
+        whole-warp all-reduce.
+    Either mismatch is a silent, semantics-changing bug if ignored, not
+    a merely-suboptimal one — so on either mismatch this rule declines
+    entirely (leaves the loop untouched) rather than firing anyway.
+    The loop then falls through to UnrollConstantShuffleLoopRule, which
+    is still correct for these cases (it attaches no reduction-specific
+    meaning to the loop, just literal substitution), just not optimal.
+    """
+
+    PATTERN = (
+        r'for\s*\(\s*int\s+(\w+)\s*=\s*1\s*;\s*'
+        r'\1\s*<\s*(32|warpSize)\s*;\s*'
+        r'\1\s*\*=\s*2\s*\)\s*\{\s*'
+        r'(\w+)\s*\+=\s*__shfl_xor_sync\s*\(\s*([^,]+?)\s*,\s*\3\s*,\s*\1\s*\)\s*;\s*\}'
+    )
+
+    FULL_MASK = "0xffffffff"
+
+    def __init__(self):
+        super().__init__(
+            name="butterfly_allreduce",
+            description="Recognize full-warp XOR-butterfly all-reduce loops and replace with ripple_reduceadd",
+            cuda_pattern=self.PATTERN,
+            priority=86  # Distinct from WarpReductionRule's 85 to avoid
+                         # relying on stable-sort tie-breaking; doesn't
+                         # matter for correctness since the two patterns
+                         # are mutually exclusive (init=1-doubling+xor
+                         # vs init=warpSize/2-halving+down). Above
+                         # UnrollConstantShuffleLoopRule (82) so this
+                         # rule gets first look at the loop.
+        )
+
+    def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
+        def replace(match):
+            accum_var = match.group(3)
+            mask = match.group(4).strip()
+
+            if mask.lower() != self.FULL_MASK:
+                # Not a full-mask reduction — can't safely assume every
+                # lane participates, so this isn't provably a whole-warp
+                # all-reduce. Leave the loop for UnrollConstantShuffleLoopRule.
+                return match.group(0)
+
+            ctx.add_warning(
+                f"Recognized full-warp XOR-butterfly all-reduce loop over "
+                f"'{accum_var}' and replaced it with a single "
+                f"ripple_reduceadd call, matching WarpReductionRule's "
+                f"established idiom for the shfl_down variant of this "
+                f"same pattern."
+            )
+
+            return f"""/* CUDA XOR-Butterfly All-Reduce -> RIPPLE Intrinsic */
+    {accum_var} = ripple_reduceadd(0b1, {accum_var});"""
+
+        return re.sub(self.PATTERN, replace, cuda_code)
+
+
 # =============================================================================
 # Atomic Operation Translation Rules
 # =============================================================================
@@ -1165,6 +1251,7 @@ class TranslationRuleEngine:
             
             # Shuffles
             WarpReductionRule(),
+            ButterflyAllReduceRule(),
             UnrollConstantShuffleLoopRule(),
             ShuffleDownRule(),
             ShuffleUpRule(),
