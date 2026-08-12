@@ -614,8 +614,13 @@ class ShuffleDownRule(TranslationRule):
                     f"cannot reference kernel-local variables like '{delta}'. "
                     f"If '{delta}' is a small, compile-time-bounded loop variable, "
                     f"see GitHub issue #11 for what's supported "
-                    f"(UnrollConstantShuffleLoopRule); otherwise this shuffle "
-                    f"cannot currently be translated."
+                    f"(UnrollConstantShuffleLoopRule) — this call cannot currently "
+                    f"be translated automatically. If '{delta}' is genuinely "
+                    f"runtime-dynamic, ripple_shuffle cannot help at all: stage the "
+                    f"exchange through __shared__ instead — write at a known index, "
+                    f"read back at the runtime index. RIPPLE lowers that read into "
+                    f"a real gather automatically, and __syncthreads() is "
+                    f"unnecessary since SIMD lanes already run in lockstep."
                 )
                 return match.group(0)
 
@@ -668,8 +673,13 @@ class ShuffleXorRule(TranslationRule):
                     f"cannot reference kernel-local variables like '{lane_mask}'. "
                     f"If '{lane_mask}' is a small, compile-time-bounded loop "
                     f"variable, see GitHub issue #11 for what's supported "
-                    f"(UnrollConstantShuffleLoopRule); otherwise this shuffle "
-                    f"cannot currently be translated."
+                    f"(UnrollConstantShuffleLoopRule) — this call cannot currently "
+                    f"be translated automatically. If '{lane_mask}' is genuinely "
+                    f"runtime-dynamic, ripple_shuffle cannot help at all: stage the "
+                    f"exchange through __shared__ instead — write at a known index, "
+                    f"read back at the runtime index. RIPPLE lowers that read into "
+                    f"a real gather automatically, and __syncthreads() is "
+                    f"unnecessary since SIMD lanes already run in lockstep."
                 )
                 return match.group(0)
 
@@ -720,8 +730,13 @@ class ShuffleUpRule(TranslationRule):
                     f"cannot reference kernel-local variables like '{delta}'. "
                     f"If '{delta}' is a small, compile-time-bounded loop variable, "
                     f"see GitHub issue #11 for what's supported "
-                    f"(UnrollConstantShuffleLoopRule); otherwise this shuffle "
-                    f"cannot currently be translated."
+                    f"(UnrollConstantShuffleLoopRule) — this call cannot currently "
+                    f"be translated automatically. If '{delta}' is genuinely "
+                    f"runtime-dynamic, ripple_shuffle cannot help at all: stage the "
+                    f"exchange through __shared__ instead — write at a known index, "
+                    f"read back at the runtime index. RIPPLE lowers that read into "
+                    f"a real gather automatically, and __syncthreads() is "
+                    f"unnecessary since SIMD lanes already run in lockstep."
                 )
                 return match.group(0)
 
@@ -767,8 +782,13 @@ class ShuffleSyncRule(TranslationRule):
                     f"cannot reference kernel-local variables like '{src_lane}'. "
                     f"If '{src_lane}' is a small, compile-time-bounded loop "
                     f"variable, see GitHub issue #11 for what's supported "
-                    f"(UnrollConstantShuffleLoopRule); otherwise this shuffle "
-                    f"cannot currently be translated."
+                    f"(UnrollConstantShuffleLoopRule) — this call cannot currently "
+                    f"be translated automatically. If '{src_lane}' is genuinely "
+                    f"runtime-dynamic, ripple_shuffle cannot help at all: stage the "
+                    f"exchange through __shared__ instead — write at a known index, "
+                    f"read back at the runtime index. RIPPLE lowers that read into "
+                    f"a real gather automatically, and __syncthreads() is "
+                    f"unnecessary since SIMD lanes already run in lockstep."
                 )
                 return match.group(0)
 
