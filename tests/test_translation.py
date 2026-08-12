@@ -892,6 +892,40 @@ __global__ void kernel(float *val_ptr) {
     assert "*val_ptr = val;\n}" in result
 
 
+def test_unroll_braceless_body_with_comment_left_untouched():
+    # Companion to the two braced comment tests above, mirroring
+    # test_unroll_braceless_body_with_string_literal_left_untouched's
+    # structure: the comment bail-out is meant to cover both
+    # PATTERN_BRACED and PATTERN_BRACELESS, but only the braced shape
+    # had committed comment regression tests (found in review). The
+    # comment is placed INSIDE the captured single statement, before
+    # its terminating semicolon — the same position the string-literal
+    # companion test uses for its literal — so this actually exercises
+    # the UNSAFE_BODY_TOKENS bail-out itself, rather than merely
+    # confirming PATTERN_BRACELESS fails to match (which a
+    # differently-positioned comment, e.g. one after the terminating
+    # semicolon, would only prove trivially: that text was never part
+    # of the captured body to begin with, so it wouldn't need this
+    # check at all — see the round-6 commit message for the verified
+    # distinction between the two positions).
+    source = """
+__global__ void kernel(float *val_ptr) {
+    float val = *val_ptr;
+    for (int i = 1; i < 8; i *= 2)
+        val += __shfl_xor_sync(0xffffffff, val, i) /* note */;
+    *val_ptr = val;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    result = transformer.transform(source)
+
+    assert "/* note */" in result
+    assert "ripple_shuffle(" not in result
+    assert ctx.errors == []
+    assert "*val_ptr = val;\n}" in result
+
+
 def test_unroll_braced_body_with_block_comment_left_untouched():
     # Critical regression guard, same danger class as the string-literal
     # case above but via a comment instead: PATTERN_BRACED's body
