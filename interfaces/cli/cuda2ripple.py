@@ -243,22 +243,32 @@ def cmd_batch(args):
     outdir = Path(args.output)
     outdir.mkdir(parents=True, exist_ok=True)
     
-    ctx = TranslationContext(target_platform=args.target)
-    transformer = CUDAToRIPPLETransformer(ctx)
-    
     success = 0
     failed = 0
-    
+
     for input_path in args.inputs:
         try:
             input_path = Path(input_path)
             output_path = outdir / input_path.with_suffix('.ripple.c').name
-            
+
             print_colored(f"  {input_path.name} -> {output_path.name}... ", end='')
-            
+
             with open(input_path, 'r') as f:
                 cuda_source = f.read()
-            
+
+            # Fresh context per file: TranslationContext accumulates
+            # per-translation state (errors, warnings, hoisted_declarations
+            # — see core/semantic_model.py) that must not leak between
+            # unrelated files translated in the same batch run. Reusing a
+            # loop-level ctx/transformer here previously caused warnings and
+            # hoisted declarations to bleed across files, and once any rule
+            # calls ctx.add_error(), it would also cause ctx.has_errors() to
+            # stay True for every file after the first failure, misreporting
+            # otherwise-successful later files as FAILED. Same bug class
+            # cmd_interactive's 'file' handler already fixed — see its
+            # comment above.
+            ctx = TranslationContext(target_platform=args.target)
+            transformer = CUDAToRIPPLETransformer(ctx)
             ripple_source = transformer.transform(cuda_source)
             
             with open(output_path, 'w') as f:

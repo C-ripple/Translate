@@ -49,6 +49,7 @@ __author__ = "CUDA2RIPPLE"
 from core.semantic_model import (
     TranslationContext,
     HexagonConfig,
+    TranslationError,
     RIPPLEBlockShape,
     RIPPLEProcessingElement,
     AIRTranslationUnit,
@@ -175,6 +176,7 @@ __all__ = [
     # Context
     "TranslationContext",
     "HexagonConfig",
+    "TranslationError",
     
     # Source frontend
     "CUDAToRIPPLETransformer",

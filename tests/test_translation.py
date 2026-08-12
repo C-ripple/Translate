@@ -998,6 +998,21 @@ def test_transform_raises_when_ctx_has_errors():
     assert "synthetic test error" in str(exc_info.value)
 
 
+def test_transform_raises_with_all_errors_when_ctx_has_multiple():
+    ctx = TranslationContext()
+    ctx.add_error("first synthetic test error")
+    ctx.add_error("second synthetic test error")
+    transformer = CUDAToRIPPLETransformer(ctx)
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform("__global__ void kernel() {}")
+    assert exc_info.value.errors == [
+        "first synthetic test error",
+        "second synthetic test error",
+    ]
+    assert "first synthetic test error" in str(exc_info.value)
+    assert "second synthetic test error" in str(exc_info.value)
+
+
 # =============================================================================
 # Run Tests
 # =============================================================================
