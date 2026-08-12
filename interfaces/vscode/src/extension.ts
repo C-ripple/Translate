@@ -55,9 +55,9 @@ class LocalTranslator {
         output = output.replace(/threadIdx\.z/g, 'ripple_id(ripple_block, 2)');
 
         // Block dimensions
-        output = output.replace(/blockDim\.x/g, 'ripple_get_size(ripple_block, 0)');
-        output = output.replace(/blockDim\.y/g, 'ripple_get_size(ripple_block, 1)');
-        output = output.replace(/blockDim\.z/g, 'ripple_get_size(ripple_block, 2)');
+        output = output.replace(/blockDim\.x/g, 'ripple_get_block_size(ripple_block, 0)');
+        output = output.replace(/blockDim\.y/g, 'ripple_get_block_size(ripple_block, 1)');
+        output = output.replace(/blockDim\.z/g, 'ripple_get_block_size(ripple_block, 2)');
 
         // Block/grid indices
         output = output.replace(/blockIdx\.x/g, 'block_idx_x');
