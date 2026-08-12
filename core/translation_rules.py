@@ -334,72 +334,28 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
     as an untranslatable variable-argument shuffle (see
     _is_compile_time_constant_expr's docstring, GitHub issue #11).
 
-    Deliberately narrow, matching only:
+    Matches:
       for (int VAR = INIT; VAR OP BOUND; VAR OP= STEP) { BODY }
-    where INIT/BOUND/STEP are plain integer literals (not symbolic
-    constants like `warpSize` — WarpReductionRule already owns that
-    specific shape via a single ripple_reduceadd call, which is better
-    than unrolling for it, and this rule's literal-only pattern can't
-    match a symbolic initializer at all, so there's no collision) and
-    BODY contains no nested braces (no if/for/while inside — multiple
-    simple statements are fine, control flow is not, since substituting
-    a loop variable's value into arbitrary nested logic safely is a much
-    larger problem than this rule is scoped to solve).
+      for (int VAR = INIT; VAR OP BOUND; VAR OP= STEP) STATEMENT;
+    INIT/BOUND accept a plain integer literal or the token `warpSize`
+    (resolved to 32); STEP is digit-only (WarpReductionRule already
+    owns the symbolic warpSize/2-init + accumulate shape, and this
+    rule's INIT/BOUND grammar can't match that shape anyway). Only
+    fires when BODY contains a shuffle call and references VAR
+    somewhere in the body — an unrelated countable loop is left alone.
 
-    Only fires when BODY contains a shuffle call AND references the loop
-    variable somewhere in the body — an unrelated countable loop is left
-    as a loop, since this is a targeted unblocking mechanism, not a
-    general "unroll every eligible loop" optimization pass. Note this
-    gate is not precise about *where* the variable appears: it doesn't
-    require the variable be an argument of the shuffle call specifically
-    (e.g. it fires even if the variable is only used for array indexing
-    elsewhere in the body, while the shuffle's own argument is a
-    different, unrelated variable). This is deliberately left loose
-    rather than tightened, because it's harmless — the substitution
-    itself is standard unrolling semantics (correct regardless of where
-    in the body the variable appears), and if the shuffle's real
-    argument turns out to still be non-constant after substitution, the
-    shuffle rule underneath still correctly refuses to translate it,
-    just now duplicated once per unrolled iteration instead of once.
-
-    Matches two body shapes via separate patterns tried in sequence
-    (braced first, since it's the common/already-tested case, then
-    braceless as a fallback) rather than one regex trying to do both:
-      for (...) { BODY }          (PATTERN_BRACED)
-      for (...) SINGLE_STATEMENT; (PATTERN_BRACELESS, no braces at all)
-    PATTERN_BRACELESS's negative lookahead (a literal open-brace,
-    negated) makes explicit that it must never match the start of a
-    braced loop (which PATTERN_BRACED should always get first crack
-    at) — belt-and-braces alongside the body-capture `[^;{}]+` already
-    refusing to cross a brace on its own.
-
-    INIT and BOUND each accept a plain integer literal OR the literal
-    token `warpSize` (resolved to 32 — true on every CUDA-capable GPU
-    architecture in practice). This is intentionally narrow: only the
-    exact token `warpSize`, not arbitrary #define'd constants or other
-    CUDA built-ins. STEP is not extended — a step of `warpSize` doesn't
-    fit this rule's multiplicative/additive step semantics and nothing
-    motivating this rule needs it. A `warpSize`-bounded loop that ALSO
-    matches WarpReductionRule's specific down-shuffle+accumulate shape
-    still goes to WarpReductionRule first (priority 85 > 82) — this
-    rule's broader bound syntax doesn't change that ordering.
-
-    PATTERN_BRACELESS's body capture (`[^;{}]+;`) truncates at the
-    FIRST semicolon — correct for an actual single simple statement,
-    but silently wrong for a braceless `if (...) stmt; else stmt2;` (or
-    do/while), where an internal semicolon belongs to the middle of the
-    statement, not its end. Rather than trying to make the regex
-    balance semicolons across control flow (fragile, and the same risk
-    resurfaces for while/do/for/switch), any braceless body starting
-    with a control-flow keyword is bailed out of entirely — see the
-    CONTROL_FLOW_PREFIX check in _replace(), which matches both the
-    spaced (`if (x)`) and unspaced (`if(x)`) spellings — leaving the
-    loop completely untouched rather than risk emitting code that compiles
-    clean but silently drops part of the original statement (e.g. an
-    else-branch surviving on only the last unrolled copy). A braced
-    body has no such risk, since PATTERN_BRACED captures everything up
-    to the loop's own closing brace regardless of internal semicolons,
-    so this check only applies to the braceless path.
+    Known limitations (each one is a deliberate bail-out to the
+    original, untouched loop text, not a translation attempt):
+      - A braced body may contain nested simple statements but not
+        nested braces (no if/for/while with their own {}).
+      - A braceless body starting with a control-flow keyword
+        (if/while/do/for/switch, spelled `kw (` or `kw(`) is left
+        untouched — its single trailing-semicolon capture can't safely
+        represent multi-statement control flow (e.g. if/else).
+      - A body containing any `"` or `'` character is left untouched,
+        for both braced and braceless bodies — neither pattern is
+        string/char-literal-aware, so a `}` or `;` inside a literal
+        could otherwise be misread as the loop's real delimiter.
     """
 
     # Matched at the start of a braceless body to bail out on control
@@ -428,9 +384,10 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
         r'(?!\{)([^;{}]+;)'
     )
 
-    # Alias for whatever the base TranslationRule/dataclass introspects
-    # (e.g. TranslationRule.matches()'s default implementation, which
-    # this class overrides below to check both patterns anyway).
+    # Kept for stylistic consistency with every other rule class in this
+    # file (each defines a `PATTERN` attribute) — not actually read
+    # anywhere for this class specifically, since matches()/apply()
+    # below explicitly use PATTERN_BRACED/PATTERN_BRACELESS instead.
     PATTERN = PATTERN_BRACED
 
     MAX_ITERATIONS = 64
@@ -508,6 +465,29 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
         step_op = match.group(5)
         step = int(match.group(6))
         body = match.group(7)
+
+        if '"' in body or "'" in body:
+            # Neither PATTERN_BRACED's `}`-delimited capture nor
+            # PATTERN_BRACELESS's `;`-delimited capture is aware of
+            # string/char literals, so a `}` or `;` INSIDE a literal
+            # (e.g. `printf("}")`) can be misread as the loop's real
+            # closing delimiter. For the braced case this is severe:
+            # the capture truncates mid-literal, and everything
+            # textually after it in the file — including the loop's
+            # REAL closing brace and any code after the loop — ends up
+            # spliced outside the function body, with no warning or
+            # error raised (ctx.errors stays empty; only the benign
+            # "Unrolled loop..." success warning fires). Real
+            # tokenization to skip literal contents correctly is out of
+            # scope for what should be a narrow, defensive check, so
+            # bail out bluntly instead: any quote character anywhere in
+            # the captured body, for BOTH body shapes, checked before
+            # any other logic runs. This costs nothing for realistic
+            # input — a shuffle-loop body containing an actual
+            # string/char literal is already a contrived shape; nobody
+            # puts printf debug statements inside a hot warp-shuffle
+            # reduction loop.
+            return match.group(0)
 
         if is_braceless and self.CONTROL_FLOW_PREFIX.match(body):
             # A braceless body starting with control flow can contain

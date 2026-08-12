@@ -729,8 +729,33 @@ __global__ void haloExchange(float *data) {
     assert sorted(int(v) for v in hoisted_bodies) == [1, 2, 4, 8, 16, 32]
 
 
-@pytest.mark.parametrize("if_spelling", ["if (flag[0] < 16)", "if(flag[0] < 16)"])
-def test_unroll_braceless_control_flow_body_left_untouched(if_spelling):
+@pytest.mark.parametrize("statement", [
+    pytest.param(
+        "if (flag[0] < 16) val[0] += __shfl_xor_sync(0xffffffff, val[0], i); else val[0] -= 1.0f;",
+        id="if_spaced",
+    ),
+    pytest.param(
+        "if(flag[0] < 16) val[0] += __shfl_xor_sync(0xffffffff, val[0], i); else val[0] -= 1.0f;",
+        id="if_unspaced",
+    ),
+    pytest.param(
+        "while (flag[0] < 16) val[0] += __shfl_xor_sync(0xffffffff, val[0], i);",
+        id="while",
+    ),
+    pytest.param(
+        "do val[0] += __shfl_xor_sync(0xffffffff, val[0], i); while (flag[0] > 0);",
+        id="do",
+    ),
+    pytest.param(
+        "for (int j = 0; j < 1; j++) val[0] += __shfl_xor_sync(0xffffffff, val[0], i);",
+        id="for",
+    ),
+    pytest.param(
+        "switch (flag[0]) val[0] += __shfl_xor_sync(0xffffffff, val[0], i);",
+        id="switch",
+    ),
+])
+def test_unroll_braceless_control_flow_body_left_untouched(statement):
     # Critical regression guard: PATTERN_BRACELESS's body capture
     # (`[^;{}]+;`) truncates at the FIRST semicolon. A braceless
     # if/else has an internal semicolon (ending the if-branch) before
@@ -745,37 +770,99 @@ def test_unroll_braceless_control_flow_body_left_untouched(if_spelling):
     # unmodified — same degrade path as any other "can't safely handle
     # this shape" case in this rule.
     #
-    # Parametrized on both the spaced (`if (x)`) and unspaced (`if(x)`)
-    # spellings: a naive whitespace-tokenized "first word is a keyword"
-    # check catches the spaced form but misses `if(...)` entirely (its
-    # first whitespace-delimited token is `if(flag[0]`, not `if`), which
+    # Parametrized across all 5 keywords CONTROL_FLOW_PREFIX guards
+    # against (if/while/do/for/switch), plus both the spaced (`if (x)`)
+    # and unspaced (`if(x)`) spellings for `if` specifically — a naive
+    # whitespace-tokenized "first word is a keyword" check catches the
+    # spaced form but misses `if(...)` entirely (its first
+    # whitespace-delimited token is `if(flag[0]`, not `if`), which
     # would let the exact same bug back in for equally idiomatic C.
     source = f"""
 __global__ void kernel(float *val, int *flag) {{
     for (int i = 1; i < 8; i *= 2)
-        {if_spelling} val[0] += __shfl_xor_sync(0xffffffff, val[0], i); else val[0] -= 1.0f;
+        {statement}
 }}
 """
     ctx = TranslationContext()
     transformer = CUDAToRIPPLETransformer(ctx)
     result = transformer.transform(source)
 
-    # The loop and its if/else body must survive completely intact —
-    # no unrolling, no lost else-branch, no duplication. (The generated
-    # file's own warning-summary header also mentions the intrinsic's
-    # name once in prose, so check the loop body specifically rather
-    # than a bare substring count across the whole file.)
-    assert f"{if_spelling} val[0] += __shfl_xor_sync(0xffffffff, val[0], i); else val[0] -= 1.0f;" in result
+    # The loop and its body must survive completely intact — no
+    # unrolling, no lost branches, no duplication.
+    assert statement in result
     assert "ripple_shuffle(" not in result
     assert result.count("for (int i = 1; i < 8; i *= 2)") == 1  # loop kept intact, not unrolled
 
-    # Task 3 (hard-fail) hasn't landed yet: the still-intact 'i'
-    # reference inside the shuffle call goes through the existing
-    # non-constant-argument warning path, same as before this rule
-    # existed at all.
-    assert any(
-        "not a compile-time constant" in w for w in ctx.warnings
-    ), f"expected a compile-time-constant warning, got: {ctx.warnings}"
+
+def test_unroll_braceless_body_starting_with_keyword_like_identifier_still_unrolls():
+    # Regression guard for CONTROL_FLOW_PREFIX's negative case: an
+    # identifier that merely starts with a control-flow keyword's
+    # letters (e.g. "forward_val", not the "for" keyword) must NOT
+    # trigger the bail-out. The `\b` word-boundary requirement after
+    # the keyword group means there's no boundary between "for" and
+    # the following "w" in "forward_val", so the regex correctly
+    # doesn't match here — this body has no control flow at all and
+    # should unroll exactly like any other braceless shuffle body.
+    source = """
+__global__ void kernel(float *data) {
+    float forward_val = data[threadIdx.x];
+    for (int i = 1; i < 8; i *= 2)
+        forward_val += __shfl_xor_sync(0xffffffff, forward_val, i);
+    data[threadIdx.x] = forward_val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_xor_sync" not in result
+    assert result.count("ripple_shuffle(") == 3  # i = 1, 2, 4
+
+
+def test_unroll_braced_body_with_string_literal_left_untouched():
+    # Critical regression guard, more severe than the braceless
+    # control-flow bug above: PATTERN_BRACED's body capture
+    # (`\{([^{}]*)\}`) is also unaware of string/char literals, so a
+    # `}` INSIDE a string (e.g. `printf("}")`) is misread as the
+    # loop's real closing brace. Reproducing the exact reported bug
+    # without this fix: the capture truncated mid-string, and
+    # everything textually after it in the file — including the
+    # loop's REAL closing brace and the trailing `*val_ptr = val;`
+    # assignment — ended up spliced OUTSIDE the function body
+    # entirely. That's structural corruption of the whole rest of the
+    # file, and it was invisible to every safety mechanism: ctx.errors
+    # stayed empty, and only the benign "Unrolled loop..." success
+    # warning fired — transform() returned normally, so even Task 3's
+    # eventual hard-fail wouldn't have caught it. The fix bails out on
+    # any quote character anywhere in the captured body, for both
+    # braced and braceless bodies.
+    source = """
+__global__ void kernel(float *val_ptr) {
+    float val = *val_ptr;
+    for (int i = 1; i < 8; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i);
+        printf("}");
+    }
+    *val_ptr = val;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    result = transformer.transform(source)
+
+    # The loop, including the string literal containing a brace, must
+    # survive completely intact — no unrolling attempted at all.
+    assert 'printf("}");' in result
+    assert "ripple_shuffle(" not in result
+    assert ctx.errors == []
+
+    # Structural integrity: the trailing assignment must still be
+    # INSIDE the function body, immediately followed by the function's
+    # own closing brace — not floating outside it (the corruption the
+    # original bug produced).
+    assert "*val_ptr = val;\n}" in result
+    # And the loop body's own embedded '}' (inside the string) must
+    # appear BEFORE that trailing assignment in the output — proving
+    # the whole loop, string literal included, was left in its
+    # original position rather than truncated and reordered.
+    assert result.index('printf("}");') < result.index("*val_ptr = val;")
 
 
 # =============================================================================
