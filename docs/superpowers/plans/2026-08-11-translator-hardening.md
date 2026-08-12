@@ -809,9 +809,9 @@ These six `.cu` files already exist in the repo (added across several early comm
 - Move: `test_ast_complex.cu` → `tests/examples/ast_if_no_braces.cu`
 - Move: `test_atomics_new.cu` → `tests/examples/atomics_cas_exch.cu`
 - Move: `test_bitwise.cu` → `tests/examples/bitwise_intrinsics.cu`
-- Move: `test_grid.cu` → `tests/examples/grid_stride.cu`
+- Move: `test_grid.cu` → `tests/examples/global_thread_index.cu`
 - Move: `test_reduction.cu` → `tests/examples/warp_reduction.cu`
-- Delete: `test_manual.cu` (content is a strict subset of `grid_stride.cu` — same single-statement kernel shape, nothing distinct to preserve)
+- Delete: `test_manual.cu` (content is a strict subset of `global_thread_index.cu` — same single-statement kernel shape, nothing distinct to preserve)
 - Delete: `test_output.json`, `test_bitwise_output.json`, `test_grid_output.json` (ad hoc snapshots from manual runs, no longer referenced by anything once the tests below exist)
 
 - [ ] **Step 1: Move the files, renamed to describe what each one exercises**
@@ -821,7 +821,7 @@ git mv test_ast.cu tests/examples/ast_flat.cu
 git mv test_ast_complex.cu tests/examples/ast_if_no_braces.cu
 git mv test_atomics_new.cu tests/examples/atomics_cas_exch.cu
 git mv test_bitwise.cu tests/examples/bitwise_intrinsics.cu
-git mv test_grid.cu tests/examples/grid_stride.cu
+git mv test_grid.cu tests/examples/global_thread_index.cu
 git mv test_reduction.cu tests/examples/warp_reduction.cu
 git rm test_manual.cu
 git rm test_output.json test_bitwise_output.json test_grid_output.json
@@ -894,7 +894,7 @@ KERNEL_FILES = [
     "ast_if_no_braces.cu",
     "atomics_cas_exch.cu",
     "bitwise_intrinsics.cu",
-    "grid_stride.cu",
+    "global_thread_index.cu",
     "warp_reduction.cu",
 ]
 
