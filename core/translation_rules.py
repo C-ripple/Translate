@@ -398,7 +398,7 @@ class WarpReductionRule(TranslationRule):
           val += __shfl_down_sync(..., val, offset);
           
     Replacement:
-      val = ripple_reduceadd(val);
+      val = ripple_reduceadd(0b1, val);
     """
     
     # Regex handles variations in spacing and variable names
