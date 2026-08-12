@@ -571,16 +571,20 @@ class GlobalKernelRule(TranslationRule):
     def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
         def replace(match):
             kernel_name = match.group(1)
-            params = match.group(2)
-            
-            # Parse parameters to add grid/block dimensions
+            params = match.group(2).strip()
+
+            # Parse parameters to add grid/block dimensions. No trailing
+            # comma when the original kernel takes zero parameters (e.g.
+            # __global__ void foo()) — a bare comma before the closing
+            # paren is invalid C, which is exactly what shipped here
+            # until caught by tests/examples/ast_flat.cu's syntax check.
+            param_suffix = f",\n    {params}" if params else ""
             return f"""void {kernel_name}_ripple(
     int block_idx_x, int block_idx_y, int block_idx_z,
     int grid_dim_x, int grid_dim_y, int grid_dim_z,
-    int block_dim_x, int block_dim_y, int block_dim_z,
-    {params}) {{
+    int block_dim_x, int block_dim_y, int block_dim_z{param_suffix}) {{
     RIPPLE_SETUP_BLOCK();"""
-        
+
         return re.sub(r'__global__\s+void\s+(\w+)\s*\(([^)]*)\)\s*\{', replace, cuda_code)
 
 
