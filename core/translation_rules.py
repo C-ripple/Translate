@@ -582,6 +582,191 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
         return result
 
 
+class PredicatedShuffleUnrollRule(TranslationRule):
+    """
+    Handles a shuffle loop whose induction variable's value SET is
+    fully compile-time-known (literal init/bound/step, exactly like
+    UnrollConstantShuffleLoopRule requires) but whose loop condition
+    also carries a second, runtime-dependent early-exit clause:
+
+      for (int VAR = INIT; VAR OP BOUND && VAR OP2 RUNTIME_ID; VAR OP= STEP) { BODY }
+
+    e.g. `for (int offset = 16; offset > 0 && offset > min_offset;
+    offset /= 2)`. RUNTIME_ID doesn't change WHICH values the loop
+    variable takes — that's still 100% determined by the literal
+    clause alone, exactly as it is for UnrollConstantShuffleLoopRule —
+    it only decides how many of those already-known iterations
+    actually run. That's a provably static value domain, not a guess,
+    which is what makes unrolling safe here.
+
+    Deliberately reuses UnrollConstantShuffleLoopRule's static
+    machinery directly (_resolve_literal, _compute_unroll_values,
+    UNSAFE_BODY_TOKENS, CONTROL_FLOW_PREFIX) rather than duplicating
+    it — that class went through 6 review-driven hardening rounds to
+    get its invisible-corruption bail-outs right, and duplicating that
+    logic here would mean re-deriving (and re-risking) all of it.
+
+    Two additional guards, both required for soundness and both
+    reasons to decline (leave the loop untouched) rather than fire:
+      - DIRECTION CONSISTENCY: OP and OP2 must be in the same family
+        (both '<'/'<=' or both '>'/'>='). The induction variable moves
+        monotonically under a literal step; this is what guarantees
+        each emitted guard's "once false, stays false" behavior
+        matches the original loop's actual early-exit semantics. A
+        mismatched direction (e.g. OP='>' with OP2='<') would let the
+        runtime clause flip back to true for a later literal value,
+        silently changing which iterations run.
+      - RUNTIME_ID UNTOUCHED IN BODY: if the runtime bound is
+        reassigned or even just referenced inside the loop body, the
+        "fixed threshold for the loop's whole lifetime" assumption the
+        guards depend on breaks. Declines rather than trying to prove
+        the body doesn't mutate it.
+
+    This is deliberately NOT a general "runtime-bounded loops are
+    finite" mechanism. `for (int offset = n; offset > 0; offset >>=
+    1)` where `n` is an unconstrained kernel parameter has NO provable
+    finite domain (n could be arbitrarily large) and is correctly left
+    for the shuffle rules to hard-fail on — guessing a domain for that
+    shape would be exactly the silent-wrongness failure class the rest
+    of this shuffle-handling work exists to eliminate. This rule only
+    fires when the ENTIRE domain is already provable from the literal
+    clause alone.
+
+    Emits one `if (LITERAL_VALUE OP2 RUNTIME_ID) { substituted_body }`
+    per unrolled value, reproducing the original loop's per-iteration
+    guard. Each literal-argument shuffle call inside is then hoisted
+    normally by the existing shuffle rules — the `if` wrapper doesn't
+    interfere, since those rules match __shfl_*_sync(...) anywhere in
+    the text regardless of surrounding brace/if nesting.
+
+    Matches only the same braced/braceless BODY shapes
+    UnrollConstantShuffleLoopRule matches, with the same known
+    limitations (no nested braces, no braceless control-flow prefix,
+    no string/char literal or comment anywhere in the body) — see that
+    class's docstring for the full rationale, since these are the same
+    guards, reused rather than restated.
+    """
+
+    _LITERAL_OR_WARPSIZE = r'(\d+|warpSize)'
+
+    PATTERN_BRACED = (
+        r'for\s*\(\s*int\s+(\w+)\s*=\s*' + _LITERAL_OR_WARPSIZE + r'\s*;\s*'
+        r'\1\s*(<=|>=|<|>)\s*' + _LITERAL_OR_WARPSIZE + r'\s*&&\s*'
+        r'\1\s*(<=|>=|<|>)\s*(\w+)\s*;\s*'
+        r'\1\s*(\*=|/=|\+=|-=)\s*(\d+)\s*\)\s*'
+        r'\{([^{}]*)\}'
+    )
+    PATTERN_BRACELESS = (
+        r'for\s*\(\s*int\s+(\w+)\s*=\s*' + _LITERAL_OR_WARPSIZE + r'\s*;\s*'
+        r'\1\s*(<=|>=|<|>)\s*' + _LITERAL_OR_WARPSIZE + r'\s*&&\s*'
+        r'\1\s*(<=|>=|<|>)\s*(\w+)\s*;\s*'
+        r'\1\s*(\*=|/=|\+=|-=)\s*(\d+)\s*\)\s*'
+        r'(?!\{)([^;{}]+;)'
+    )
+
+    # Kept for stylistic consistency with every other rule class in this
+    # file (each defines a `PATTERN` attribute) — not actually read
+    # anywhere for this class specifically, since matches()/apply()
+    # below explicitly use PATTERN_BRACED/PATTERN_BRACELESS instead.
+    PATTERN = PATTERN_BRACED
+
+    def __init__(self):
+        super().__init__(
+            name="predicated_shuffle_unroll",
+            description="Unroll a compile-time-bounded shuffle loop with a runtime early-exit clause, guarding each iteration",
+            cuda_pattern=self.PATTERN_BRACED,
+            priority=81  # Between UnrollConstantShuffleLoopRule (82) and
+                         # the shuffle rules (70) — the two patterns are
+                         # mutually exclusive (compound '&&' condition
+                         # vs single condition) so exact ordering
+                         # relative to 82 doesn't affect correctness,
+                         # but must be > 70 so this rule gets a chance
+                         # before the shuffle rules would otherwise
+                         # hard-fail on the untouched loop.
+        )
+
+    def matches(self, cuda_code: str) -> bool:
+        return bool(
+            re.search(self.PATTERN_BRACED, cuda_code)
+            or re.search(self.PATTERN_BRACELESS, cuda_code)
+        )
+
+    def _replace(self, match, ctx: TranslationContext, is_braceless: bool = False) -> str:
+        var_name = match.group(1)
+        init = UnrollConstantShuffleLoopRule._resolve_literal(match.group(2))
+        cond_op = match.group(3)
+        bound = UnrollConstantShuffleLoopRule._resolve_literal(match.group(4))
+        cond_op2 = match.group(5)
+        runtime_id = match.group(6)
+        step_op = match.group(7)
+        step = int(match.group(8))
+        body = match.group(9)
+
+        if cond_op[0] != cond_op2[0]:
+            # Direction mismatch — see class docstring. Independent
+            # per-iteration guards would not correctly reproduce the
+            # original loop's early-exit behavior.
+            return match.group(0)
+
+        if any(tok in body for tok in UnrollConstantShuffleLoopRule.UNSAFE_BODY_TOKENS):
+            # Same invisible-corruption risk UnrollConstantShuffleLoopRule
+            # already hardened against — reused directly, not re-derived.
+            return match.group(0)
+
+        if is_braceless and UnrollConstantShuffleLoopRule.CONTROL_FLOW_PREFIX.match(body):
+            return match.group(0)
+
+        if not re.search(r'__shfl(?:_(?:down|up|xor))?_sync\s*\(', body):
+            return match.group(0)
+        if not re.search(rf'\b{re.escape(var_name)}\b', body):
+            return match.group(0)
+        if re.search(rf'\b{re.escape(runtime_id)}\b', body):
+            # The runtime bound must be untouched by the body — see
+            # class docstring's second guard.
+            return match.group(0)
+
+        values = UnrollConstantShuffleLoopRule._compute_unroll_values(
+            init, cond_op, bound, step_op, step, UnrollConstantShuffleLoopRule.MAX_ITERATIONS
+        )
+        if values is None:
+            return match.group(0)
+
+        guarded_statements = []
+        for v in values:
+            substituted = re.sub(rf'\b{re.escape(var_name)}\b', str(v), body).strip()
+            guarded_statements.append(f"if ({v} {cond_op2} {runtime_id}) {{ {substituted} }}")
+
+        ctx.add_warning(
+            f"Predicated-unrolled loop over '{var_name}' into {len(values)} "
+            f"runtime-guarded iterations ({', '.join(str(v) for v in values)}), "
+            f"each gated on 'VALUE {cond_op2} {runtime_id}', to resolve a "
+            f"compile-time-constant shuffle argument while preserving the "
+            f"loop's runtime early-exit condition"
+        )
+
+        joined = "\n    ".join(guarded_statements)
+        values_str = ', '.join(str(v) for v in values)
+        return (
+            f"/* Predicated unroll: {var_name} = {values_str}, "
+            f"each guarded by (VALUE {cond_op2} {runtime_id}) */\n    {joined}"
+        )
+
+    def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
+        result = re.sub(
+            self.PATTERN_BRACED,
+            lambda m: self._replace(m, ctx, is_braceless=False),
+            cuda_code,
+            flags=re.DOTALL
+        )
+        result = re.sub(
+            self.PATTERN_BRACELESS,
+            lambda m: self._replace(m, ctx, is_braceless=True),
+            result,
+            flags=re.DOTALL
+        )
+        return result
+
+
 class ShuffleDownRule(TranslationRule):
     """Translates __shfl_down_sync to ripple_shuffle."""
     
@@ -1293,6 +1478,7 @@ class TranslationRuleEngine:
             WarpReductionRule(),
             ButterflyAllReduceRule(),
             UnrollConstantShuffleLoopRule(),
+            PredicatedShuffleUnrollRule(),
             ShuffleDownRule(),
             ShuffleUpRule(),
             ShuffleXorRule(),

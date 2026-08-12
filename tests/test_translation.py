@@ -26,6 +26,7 @@ from frontends.source.cuda_frontend import (
 from frontends.ir.ir_frontend import (
     LLVMIRParser, IRAnalyzer, CUDAIRToRIPPLETranslator
 )
+from tests.compile_verify import verify_ripple_syntax
 
 
 # =============================================================================
@@ -1182,6 +1183,186 @@ __global__ void reduce(float *val) {
     result = translate_cuda_source(source)
     assert "ripple_reduceadd(0b1, sum)" in result
     assert "ripple_shuffle(" not in result
+
+
+def test_predicated_unroll_halving_loop_with_runtime_lower_bound():
+    # The motivating shape: offset's value set (16, 8, 4, 2, 1) is
+    # 100% determined by the literal init/bound/step — min_offset only
+    # decides how many of those 5 already-known iterations actually
+    # run, not which values occur.
+    source = """
+__global__ void haloExchange(float *data, int min_offset) {
+    float val = data[threadIdx.x];
+    for (int offset = 16; offset > 0 && offset > min_offset; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_down_sync" not in result
+    assert result.count("ripple_shuffle(") == 5
+    assert "if (16 > min_offset)" in result
+    assert "if (8 > min_offset)" in result
+    assert "if (4 > min_offset)" in result
+    assert "if (2 > min_offset)" in result
+    assert "if (1 > min_offset)" in result
+
+
+def test_predicated_unroll_doubling_loop_with_runtime_upper_bound():
+    # Mirror shape, opposite direction: '<' literal clause paired with
+    # a '<' runtime clause — proves direction-matching isn't hardcoded
+    # to the halving/'>' case.
+    source = """
+__global__ void butterflyPartial(float *data, int max_i) {
+    float val = data[threadIdx.x];
+    for (int i = 1; i < 32 && i < max_i; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_xor_sync" not in result
+    assert result.count("ripple_shuffle(") == 5
+    assert "if (1 < max_i)" in result
+    assert "if (16 < max_i)" in result
+
+
+def test_predicated_unroll_output_passes_syntax_check():
+    source = """
+__global__ void haloExchange(float *data, int min_offset) {
+    float val = data[threadIdx.x];
+    for (int offset = 16; offset > 0 && offset > min_offset; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    success, output = verify_ripple_syntax(result)
+    assert success, output
+
+
+def test_predicated_unroll_declines_on_direction_mismatch_and_hard_fails():
+    # CRITICAL correctness guard: a '>' literal clause paired with a
+    # '<' runtime clause breaks the "once false, stays false"
+    # guarantee independent per-iteration guards rely on. Must decline
+    # entirely — leaving 'offset' unsubstituted — so the existing
+    # hard-fail machinery (not a corrupted guess) is what catches this.
+    source = """
+__global__ void mismatched(float *data, int min_offset) {
+    float val = data[threadIdx.x];
+    for (int offset = 16; offset > 0 && offset < min_offset; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
+    assert "'offset'" in str(exc_info.value)
+
+
+def test_predicated_unroll_declines_when_body_touches_runtime_id_and_hard_fails():
+    # CRITICAL correctness guard: if the body reassigns or reads the
+    # runtime bound, the "fixed threshold for the loop's whole
+    # lifetime" assumption the guards depend on no longer holds. Must
+    # decline rather than guess it's still safe.
+    source = """
+__global__ void bodyTouchesBound(float *data, int min_offset) {
+    float val = data[threadIdx.x];
+    for (int offset = 16; offset > 0 && offset > min_offset; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset) + min_offset;
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
+
+
+def test_predicated_unroll_reuses_unsafe_body_token_guard():
+    # Proves the delegation to UnrollConstantShuffleLoopRule.UNSAFE_BODY_TOKENS
+    # is actually wired up, not just referenced — a comment containing a
+    # stray brace must still bail this rule out too, for the same
+    # invisible-corruption reason the original 6 hardening rounds fixed.
+    source = """
+__global__ void hasComment(float *data, int min_offset) {
+    float val = data[threadIdx.x];
+    for (int offset = 16; offset > 0 && offset > min_offset; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset); // note [3] }
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
+
+
+def test_predicated_unroll_braceless_body_supported():
+    source = """
+__global__ void haloExchange(float *data, int min_offset) {
+    float val = data[threadIdx.x];
+    for (int offset = 16; offset > 0 && offset > min_offset; offset /= 2)
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert result.count("ripple_shuffle(") == 5
+    success, output = verify_ripple_syntax(result)
+    assert success, output
+
+
+def test_predicated_unroll_braceless_declines_on_control_flow_body():
+    # Proves the delegation to UnrollConstantShuffleLoopRule.CONTROL_FLOW_PREFIX
+    # is actually wired up for the braceless path.
+    source = """
+__global__ void controlFlowBody(float *data, int min_offset) {
+    float val = data[threadIdx.x];
+    for (int offset = 16; offset > 0 && offset > min_offset; offset /= 2)
+        if (offset > 4) val += __shfl_down_sync(0xffffffff, val, offset);
+    data[threadIdx.x] = val;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    with pytest.raises(TranslationError):
+        transformer.transform(source)
+
+
+def test_predicated_unroll_does_not_collide_with_plain_unroll_rule():
+    # A plain (non-compound-condition) loop must still go through
+    # UnrollConstantShuffleLoopRule exactly as before — the new rule's
+    # pattern requires '&&' and must not accidentally also match this.
+    source = """
+__global__ void plainLoop(float *data) {
+    float val = data[threadIdx.x];
+    for (int i = 1; i < 8; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    # NOTE: deliberately not "if (" not in result — the RIPPLE
+    # boilerplate header unconditionally emits ripple_atomic_max/min
+    # macros containing "if (", so that check would fail for any
+    # translation output regardless of this rule's behavior. Assert
+    # directly on which rule's warning fired instead.
+    assert "Unrolled loop over 'i'" in result  # plain rule fired
+    assert "Predicated-unrolled" not in result  # new rule did not fire
+    assert result.count("ripple_shuffle(") == 3  # i = 1, 2, 4
 
 
 # =============================================================================
