@@ -324,6 +324,138 @@ def _is_compile_time_constant_expr(expr: str) -> bool:
     return stripped.count('(') == stripped.count(')')
 
 
+class UnrollConstantShuffleLoopRule(TranslationRule):
+    """
+    Unrolls a small, compile-time-bounded counting loop whose body
+    contains a warp-shuffle call using the loop's induction variable —
+    substituting each literal value the variable takes, so the
+    already-correct literal-argument shuffle rules can hoist a real
+    permutation function for each, instead of the whole loop being left
+    as an untranslatable variable-argument shuffle (see
+    _is_compile_time_constant_expr's docstring, GitHub issue #11).
+
+    Deliberately narrow, matching only:
+      for (int VAR = INIT; VAR OP BOUND; VAR OP= STEP) { BODY }
+    where INIT/BOUND/STEP are plain integer literals (not symbolic
+    constants like `warpSize` — WarpReductionRule already owns that
+    specific shape via a single ripple_reduceadd call, which is better
+    than unrolling for it, and this rule's literal-only pattern can't
+    match a symbolic initializer at all, so there's no collision) and
+    BODY contains no nested braces (no if/for/while inside — multiple
+    simple statements are fine, control flow is not, since substituting
+    a loop variable's value into arbitrary nested logic safely is a much
+    larger problem than this rule is scoped to solve).
+
+    Only fires when BODY actually references the loop variable inside a
+    shuffle call — an unrelated countable loop is left as a loop, since
+    this is a targeted unblocking mechanism, not a general "unroll every
+    eligible loop" optimization pass.
+    """
+
+    PATTERN = (
+        r'for\s*\(\s*int\s+(\w+)\s*=\s*(\d+)\s*;\s*'
+        r'\1\s*(<=|>=|<|>)\s*(\d+)\s*;\s*'
+        r'\1\s*(\*=|/=|\+=|-=)\s*(\d+)\s*\)\s*'
+        r'\{([^{}]*)\}'
+    )
+
+    MAX_ITERATIONS = 64
+
+    def __init__(self):
+        super().__init__(
+            name="unroll_constant_shuffle_loop",
+            description="Unroll small compile-time-bounded loops feeding a shuffle intrinsic",
+            cuda_pattern=self.PATTERN,
+            priority=82  # below WarpReductionRule (85), above shuffle rules (70)
+        )
+
+    @staticmethod
+    def _compute_unroll_values(init, cond_op, bound, step_op, step, max_iterations):
+        """
+        Returns the list of literal values the loop variable takes, or
+        None if the loop can't be safely/finitely unrolled (step doesn't
+        make progress toward the bound, or would take more than
+        max_iterations steps — either way, leave the original loop text
+        untouched rather than guess).
+        """
+        current = init
+        values = []
+
+        def condition_holds(v):
+            if cond_op == '<':
+                return v < bound
+            if cond_op == '<=':
+                return v <= bound
+            if cond_op == '>':
+                return v > bound
+            if cond_op == '>=':
+                return v >= bound
+            return False
+
+        def apply_step(v):
+            if step_op == '*=':
+                return v * step
+            if step_op == '/=':
+                return v // step if step != 0 else None
+            if step_op == '+=':
+                return v + step
+            if step_op == '-=':
+                return v - step
+            return None
+
+        while condition_holds(current):
+            values.append(current)
+            if len(values) > max_iterations:
+                return None
+            next_val = apply_step(current)
+            if next_val is None or next_val == current:
+                return None
+            current = next_val
+
+        return values or None
+
+    def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
+        def replace(match):
+            var_name = match.group(1)
+            init = int(match.group(2))
+            cond_op = match.group(3)
+            bound = int(match.group(4))
+            step_op = match.group(5)
+            step = int(match.group(6))
+            body = match.group(7)
+
+            if not re.search(r'__shfl(?:_(?:down|up|xor))?_sync\s*\(', body):
+                return match.group(0)
+            if not re.search(rf'\b{re.escape(var_name)}\b', body):
+                return match.group(0)
+
+            values = self._compute_unroll_values(
+                init, cond_op, bound, step_op, step, self.MAX_ITERATIONS
+            )
+            if values is None:
+                # Not safely/finitely unrollable — leave the loop as-is.
+                # The shuffle rule underneath will still see the intact
+                # variable reference and correctly refuse to translate it.
+                return match.group(0)
+
+            unrolled_statements = []
+            for v in values:
+                substituted = re.sub(rf'\b{re.escape(var_name)}\b', str(v), body)
+                unrolled_statements.append(substituted.strip())
+
+            ctx.add_warning(
+                f"Unrolled loop over '{var_name}' into {len(values)} "
+                f"iterations ({', '.join(str(v) for v in values)}) to "
+                f"resolve a compile-time-constant shuffle argument"
+            )
+
+            joined = "\n    ".join(unrolled_statements)
+            values_str = ', '.join(str(v) for v in values)
+            return f"/* Unrolled: {var_name} = {values_str} */\n    {joined}"
+
+        return re.sub(self.PATTERN, replace, cuda_code, flags=re.DOTALL)
+
+
 class ShuffleDownRule(TranslationRule):
     """Translates __shfl_down_sync to ripple_shuffle."""
     
@@ -898,6 +1030,7 @@ class TranslationRuleEngine:
             
             # Shuffles
             WarpReductionRule(),
+            UnrollConstantShuffleLoopRule(),
             ShuffleDownRule(),
             ShuffleUpRule(),
             ShuffleXorRule(),

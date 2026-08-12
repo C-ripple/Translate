@@ -564,6 +564,105 @@ __global__ void kernel(int *a) {{
     assert "ripple_shuffle(" in result
 
 
+def test_unroll_doubling_loop_resolves_xor_shuffle():
+    # The exact butterfly-reduction example demonstrated in conversation:
+    # i doubles from 1 to 16 (5 iterations), feeding __shfl_xor_sync's
+    # lane_mask argument — previously left untranslated with a warning,
+    # since 'i' is a kernel-local loop variable, not a compile-time
+    # constant, from the shuffle rule's point of view in isolation.
+    source = """
+__global__ void butterflyReduce(float *data) {
+    float val = data[threadIdx.x];
+    for (int i = 1; i < 32; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_xor_sync" not in result
+    assert result.count("ripple_shuffle(") == 5  # i = 1, 2, 4, 8, 16
+
+
+def test_unroll_halving_loop_resolves_down_shuffle():
+    # Same mechanism, opposite direction (halving instead of doubling),
+    # and a different shuffle intrinsic — proves the rule is shape-based
+    # (any counting loop with literal bounds), not hardcoded to one
+    # specific loop direction or intrinsic. Deliberately NOT the
+    # warpSize/2 + __shfl_down_sync + accumulate shape WarpReductionRule
+    # already owns (that rule requires the symbolic literal "warpSize",
+    # not a plain digit, so it can't fire here) — this uses a literal
+    # loop bound and a non-accumulating shuffle_up to stay clear of it.
+    source = """
+__global__ void haloExchange(float *data) {
+    float val = data[threadIdx.x];
+    for (int offset = 16; offset > 0; offset /= 2) {
+        val = __shfl_up_sync(0xffffffff, val, offset);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_up_sync" not in result
+    assert result.count("ripple_shuffle(") == 5  # offset = 16, 8, 4, 2, 1
+
+
+def test_unroll_produces_distinct_literal_values_per_iteration():
+    # Not just "5 calls exist" — each one must actually reference the
+    # right literal value, not the same one 5 times or a mangled one.
+    source = """
+__global__ void butterflyReduce(float *data) {
+    float val = data[threadIdx.x];
+    for (int i = 1; i < 8; i *= 2) {
+        val += __shfl_xor_sync(0xffffffff, val, i);
+    }
+    data[threadIdx.x] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    import re
+    hoisted_bodies = re.findall(r'return k \^ \((\d+)\);', result)
+    assert sorted(int(v) for v in hoisted_bodies) == [1, 2, 4]
+
+
+def test_unroll_does_not_fire_on_unrelated_countable_loop():
+    # A loop with literal bounds but no shuffle call in its body should
+    # be left completely alone — unrolling is not a general-purpose
+    # optimization this translator applies proactively, only a targeted
+    # fix for the one thing that would otherwise be untranslatable.
+    source = """
+__global__ void sumLoop(int *data) {
+    int total = 0;
+    for (int i = 0; i < 4; i += 1) {
+        total += data[i];
+    }
+    data[0] = total;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "for (int i = 0; i < 4; i += 1)" in result or "for(int i = 0; i < 4; i += 1)" in result.replace(" ", "").replace("for(", "for (")
+
+
+def test_unroll_does_not_fire_when_warp_reduction_rule_already_owns_the_pattern():
+    # Regression guard: the classic warpSize/2 + __shfl_down_sync +
+    # accumulate shape must still go through WarpReductionRule's single
+    # ripple_reduceadd(0b1, ...) call, not get unrolled into 5 separate
+    # ripple_shuffle calls — unrolling only fires on loops it doesn't
+    # already recognize (literal, not symbolic, bounds).
+    source = """
+__global__ void reduce(float *val) {
+    float sum = *val;
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+    *val = sum;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "ripple_reduceadd(0b1, sum)" in result
+    assert "ripple_shuffle(" not in result
+
+
 # =============================================================================
 # Run Tests
 # =============================================================================
