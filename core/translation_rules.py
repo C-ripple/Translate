@@ -433,14 +433,16 @@ class UnrollConstantShuffleLoopRule(TranslationRule):
             or re.search(self.PATTERN_BRACELESS, cuda_code)
         )
 
-    # Also called directly by PredicatedShuffleUnrollRule — check both
-    # when changing.
+    # Also called directly by PredicatedShuffleUnrollRule — check that
+    # class too when changing this method's signature or behavior.
     @staticmethod
     def _resolve_literal(token: str) -> int:
         """Resolves a captured INIT/BOUND token ('warpSize' or a plain
         integer literal string) to its integer value."""
         return 32 if token == 'warpSize' else int(token)
 
+    # Also called directly by PredicatedShuffleUnrollRule — check that
+    # class too when changing this method's signature or behavior.
     @staticmethod
     def _compute_unroll_values(init, cond_op, bound, step_op, step, max_iterations):
         """
@@ -610,8 +612,9 @@ class PredicatedShuffleUnrollRule(TranslationRule):
 
     Two additional guards, both reasons to decline (leave the loop
     untouched) rather than fire — but not equally load-bearing: one
-    closes a proven correctness gap, the other declines rather than
-    proving an unmutated invariant.
+    closes a proven correctness gap; the other is a conservative
+    decline — it bails rather than trying to prove the runtime bound
+    stays untouched.
       - DIRECTION CONSISTENCY: OP and OP2 must be in the same family
         (both '<'/'<=' or both '>'/'>='). The induction variable moves
         monotonically under a literal step; this is what guarantees
