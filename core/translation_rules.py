@@ -775,7 +775,7 @@ class PredicatedShuffleUnrollRule(TranslationRule):
 
 
 class TernaryDispatchShuffleArgumentRule(TranslationRule):
-    """
+    r"""
     Resolves a shuffle argument that is a two-way, compile-time-constant
     ternary (`COND ? LITERAL_A : LITERAL_B`) by splitting the single
     dynamic call into two statically-argument'd calls behind an if/else
