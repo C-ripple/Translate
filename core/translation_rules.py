@@ -1041,6 +1041,79 @@ class WarpReductionRule(TranslationRule):
         return re.sub(self.PATTERN, replace, cuda_code, flags=re.DOTALL)
 
 
+class WarpMinMaxReductionRule(TranslationRule):
+    """
+    Detects and optimizes the two-statement warp min/max reduction
+    idiom — the fmaxf/fminf sibling of WarpReductionRule's single-
+    statement '+=' accumulate pattern:
+
+    Pattern:
+      for (int offset = warpSize/2; offset > 0; offset /= 2) {
+          TYPE other = __shfl_down_sync(..., val, offset);
+          val = fmaxf(val, other);   // or fminf
+      }
+
+    Replacement:
+      val = ripple_reducemax(0b1, val);   // or ripple_reducemin
+
+    ripple_reducemax/ripple_reducemin are real RIPPLE intrinsics (see
+    api.md's reduction-functions list, alongside ripple_reduceadd,
+    ripple_reduceand, ripple_reduceor, ripple_reducexor) — same family
+    WarpReductionRule already uses for ripple_reduceadd, just for the
+    two-statement min/max shape instead of the single-statement '+='
+    shape. Mutually exclusive with WarpReductionRule by construction:
+    that rule's PATTERN requires the loop body be exactly one '+='
+    statement, which can't match this rule's two-statement
+    declare-then-fmaxf/fminf shape, and vice versa.
+    """
+
+    # Group 1: Loop variable (e.g. "offset")
+    # Group 2: Temporary variable holding the shuffled-in value (e.g. "other")
+    # Group 3: Accumulator variable (e.g. "local_max")
+    # Group 4: "fmaxf" or "fminf"
+    PATTERN = (
+        r'for\s*\(\s*int\s+(\w+)\s*=\s*warpSize\s*/\s*2\s*;\s*\1\s*>\s*0\s*;\s*\1\s*/=\s*2\s*\)\s*\{\s*'
+        r'\w+\s+(\w+)\s*=\s*__shfl_down_sync\s*\(\s*[^,]+,\s*(\w+)\s*,\s*\1\s*\)\s*;\s*'
+        r'\3\s*=\s*(fmaxf|fminf)\s*\(\s*\3\s*,\s*\2\s*\)\s*;\s*\}'
+    )
+
+    FUNC_TO_INTRINSIC = {'fmaxf': 'ripple_reducemax', 'fminf': 'ripple_reducemin'}
+
+    def __init__(self):
+        super().__init__(
+            name="warp_minmax_reduction",
+            description="Optimize warp min/max reduction loop to ripple_reducemax/ripple_reducemin",
+            cuda_pattern=self.PATTERN,
+            priority=84  # Same tier as WarpReductionRule (85) — a
+                         # distinct value to avoid relying on
+                         # stable-sort tie-breaking, though it doesn't
+                         # matter for correctness since the two
+                         # patterns are mutually exclusive (single '+='
+                         # statement vs. two-statement declare-then-
+                         # fmaxf/fminf). Above the shuffle rules (70)
+                         # so this rule gets first look at the loop.
+        )
+
+    def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
+        def replace(match):
+            accum_var = match.group(3)
+            func = match.group(4)
+            intrinsic = self.FUNC_TO_INTRINSIC[func]
+
+            ctx.add_warning(
+                f"Optimized warp {func} reduction for '{accum_var}' to '{intrinsic}'"
+            )
+
+            # Same dims-bitfield reasoning as WarpReductionRule: this
+            # rule only matches the classic single-dimension
+            # warpSize-halving reduction, i.e. dimension 0 — hence
+            # 0b1, not an arbitrary placeholder.
+            return f"""/* CUDA Warp {func} Reduction Loop -> RIPPLE Intrinsic */
+    {accum_var} = {intrinsic}(0b1, {accum_var});"""
+
+        return re.sub(self.PATTERN, replace, cuda_code, flags=re.DOTALL)
+
+
 class ButterflyAllReduceRule(TranslationRule):
     """
     Recognizes the classic full-warp XOR-butterfly all-reduce loop and
@@ -1483,6 +1556,7 @@ class TranslationRuleEngine:
             
             # Shuffles
             WarpReductionRule(),
+            WarpMinMaxReductionRule(),
             ButterflyAllReduceRule(),
             UnrollConstantShuffleLoopRule(),
             PredicatedShuffleUnrollRule(),

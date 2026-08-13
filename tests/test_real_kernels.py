@@ -26,6 +26,21 @@ emit either a C++ lambda or a nested function definition — neither
 valid C — as an inline ripple_shuffle() argument; they now hoist a
 uniquely-named, file-scope helper function instead (see
 TranslationContext.hoisted_declarations in core/semantic_model.py).
+
+cuda_kernels.cu is a larger, 10-kernel fixture that was previously
+orphaned entirely (wired into no test) because it failed to translate
+at all — a softmax kernel's max-reduction shuffle loop (fmaxf, not
+'+=') didn't match any rule's shape. WarpMinMaxReductionRule closes
+that gap, so this file now translates successfully and is covered
+here structurally. It's deliberately NOT in SYNTAX_CHECK_PARAMS yet:
+getting it through a real clang syntax check requires fixing three
+separate, unrelated gaps this file is the first fixture to exercise —
+scalar (non-array) __shared__ declarations aren't translated at all
+(only array-form ones are), a bare warpSize token used outside a
+recognized loop pattern passes through untranslated, and a few CUDA
+math intrinsics (expf, INFINITY, __float_as_int) have no RIPPLE
+mapping. None of that is shuffle-related; closing it is separate,
+larger, unscoped work.
 """
 
 import sys
@@ -49,6 +64,7 @@ KERNEL_FILES = [
     "warp_reduction.cu",
     "warp_shuffle_xor.cu",
     "butterfly_reduction.cu",
+    "cuda_kernels.cu",
 ]
 
 SYNTAX_CHECK_PARAMS = [

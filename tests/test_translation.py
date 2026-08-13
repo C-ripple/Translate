@@ -1366,6 +1366,76 @@ __global__ void plainLoop(float *data) {
     assert "Predicated-unrolled" not in result  # new rule did not fire
     assert result.count("ripple_shuffle(") == 3  # i = 1, 2, 4
 
+def test_warp_minmax_reduction_translates_fmaxf_to_ripple_reducemax():
+    source = """
+__global__ void warpMax(float *data) {
+    float local_max = data[threadIdx.x];
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        float other = __shfl_down_sync(0xffffffff, local_max, offset);
+        local_max = fmaxf(local_max, other);
+    }
+    data[threadIdx.x] = local_max;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_down_sync" not in result
+    assert "ripple_reducemax(0b1, local_max)" in result
+
+
+def test_warp_minmax_reduction_translates_fminf_to_ripple_reducemin():
+    source = """
+__global__ void warpMin(float *data) {
+    float local_min = data[threadIdx.x];
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        float other = __shfl_down_sync(0xffffffff, local_min, offset);
+        local_min = fminf(local_min, other);
+    }
+    data[threadIdx.x] = local_min;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_down_sync" not in result
+    assert "ripple_reducemin(0b1, local_min)" in result
+
+
+def test_warp_minmax_reduction_does_not_collide_with_plain_warp_reduction_rule():
+    # Regression guard: the classic '+=' accumulate shape must still go
+    # through WarpReductionRule unchanged — the two rules match
+    # mutually exclusive body shapes (single '+=' statement vs. a
+    # two-statement declare-then-fmaxf/fminf), so there's no overlap.
+    source = """
+__global__ void reduce(float *val) {
+    float sum = *val;
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+    *val = sum;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "ripple_reduceadd(0b1, sum)" in result
+    assert "ripple_reducemax" not in result
+    assert "ripple_reducemin" not in result
+
+
+def test_warp_minmax_reduction_fires_on_real_fixture_snippet():
+    # The exact loop from tests/examples/cuda_kernels.cu's softmax
+    # kernel — the specific loop that orphaned that fixture (it's the
+    # only unresolved shuffle in the whole 10-kernel file).
+    source = """
+__global__ void softmax(float *input, float *output, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    float local_max = (idx < n) ? input[idx] : -1.0f;
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        float other = __shfl_down_sync(0xffffffff, local_max, offset);
+        local_max = fmaxf(local_max, other);
+    }
+    output[idx] = local_max;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "ripple_reducemax(0b1, local_max)" in result
+
 
 # =============================================================================
 # Run Tests
