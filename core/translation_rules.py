@@ -1073,7 +1073,7 @@ class WarpMinMaxReductionRule(TranslationRule):
     # Group 4: "fmaxf" or "fminf"
     PATTERN = (
         r'for\s*\(\s*int\s+(\w+)\s*=\s*warpSize\s*/\s*2\s*;\s*\1\s*>\s*0\s*;\s*\1\s*/=\s*2\s*\)\s*\{\s*'
-        r'\w+\s+(\w+)\s*=\s*__shfl_down_sync\s*\(\s*[^,]+,\s*(\w+)\s*,\s*\1\s*\)\s*;\s*'
+        r'\w+\s+(\w+)\s*=\s*__shfl_down_sync\s*\(\s*[^,]+,\s*(\w+)\s*,\s*\1\s*(?:,[^)]+)?\)\s*;\s*'
         r'\3\s*=\s*(fmaxf|fminf)\s*\(\s*\3\s*,\s*\2\s*\)\s*;\s*\}'
     )
 

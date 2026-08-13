@@ -1382,6 +1382,27 @@ __global__ void warpMax(float *data) {
     assert "ripple_reducemax(0b1, local_max)" in result
 
 
+def test_warp_minmax_reduction_tolerates_optional_width_argument():
+    # WarpReductionRule's '+=' sibling tolerates __shfl_down_sync's
+    # optional 4th (width) argument — this rule should too, for the
+    # same reason: real CUDA code can pass it, and a reader shouldn't
+    # have to guess why the min/max variant is narrower than the '+='
+    # one it's explicitly documented as a sibling of.
+    source = """
+__global__ void warpMax(float *data) {
+    float local_max = data[threadIdx.x];
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        float other = __shfl_down_sync(0xffffffff, local_max, offset, 32);
+        local_max = fmaxf(local_max, other);
+    }
+    data[threadIdx.x] = local_max;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_down_sync" not in result
+    assert "ripple_reducemax(0b1, local_max)" in result
+
+
 def test_warp_minmax_reduction_translates_fminf_to_ripple_reducemin():
     source = """
 __global__ void warpMin(float *data) {
