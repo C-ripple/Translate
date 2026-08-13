@@ -43,8 +43,8 @@ web = [
 ]
 
 [project.scripts]
-cuda2ripple = "cuda2ripple.interfaces.cli.cuda2ripple:main"
-cuda2ripple-web = "cuda2ripple.interfaces.web.server:run_server"
+cuda2ripple = "interfaces.cli.cuda2ripple:main"
+cuda2ripple-web = "interfaces.web.server:run_server"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/cuda2ripple"
@@ -52,9 +52,12 @@ Documentation = "https://github.com/yourusername/cuda2ripple/docs"
 Repository = "https://github.com/yourusername/cuda2ripple"
 Issues = "https://github.com/yourusername/cuda2ripple/issues"
 
+[tool.setuptools]
+py-modules = ["cuda2ripple"]
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["cuda2ripple*"]
+include = ["core*", "interfaces*", "frontends*", "backends*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
