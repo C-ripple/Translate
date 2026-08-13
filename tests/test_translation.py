@@ -1343,6 +1343,146 @@ __global__ void controlFlowBody(float *data, int min_offset) {
         transformer.transform(source)
 
 
+def test_ternary_dispatch_resolves_declaration_form():
+    # The MVP shape: a fresh-declared variable assigned directly from a
+    # shuffle call whose dynamic argument is a two-way ternary with
+    # compile-time-constant branches. Both literal-argument calls must
+    # end up hoisted into distinct ripple_shuffle calls — this is the
+    # non-loop sibling of UnrollConstantShuffleLoopRule's loop-shaped
+    # resolution (GitHub issue #11).
+    source = """
+__global__ void kernel(float *data, int lane) {
+    float val = data[lane];
+    float neighbor = __shfl_xor_sync(0xffffffff, val, lane < 16 ? 1 : 2);
+    data[lane] = neighbor;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_xor_sync" not in result
+    # NOTE: deliberately not "?" not in result — like the "if (" note on
+    # test_predicated_unroll_does_not_collide_with_plain_unroll_rule
+    # above, the RIPPLE boilerplate unconditionally emits a
+    # ripple_atomic_cas fallback macro containing a '?' ternary, so
+    # that check would fail for any translation output regardless of
+    # this rule's behavior. Assert directly on the original ternary
+    # being gone from the kernel body instead.
+    assert "? 1 : 2" not in result
+    assert result.count("ripple_shuffle(") == 2
+    assert "if (lane < 16)" in result
+    hoisted_bodies = re.findall(r'return k \^ \((\d+)\);', result)
+    assert sorted(int(v) for v in hoisted_bodies) == [1, 2]
+
+
+def test_ternary_dispatch_resolves_compound_assign_form():
+    # Same mechanism, the accumulate-into-existing-variable shape
+    # (VAR += INTRINSIC(...)) rather than a fresh declaration — proves
+    # the rule handles both statement shapes it claims to, not just one.
+    source = """
+__global__ void kernel(float *data, int lane, int use_far) {
+    float sum = data[lane];
+    sum += __shfl_down_sync(0xffffffff, sum, use_far ? 8 : 1);
+    data[lane] = sum;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_down_sync" not in result
+    assert result.count("ripple_shuffle(") == 2
+    assert "if (use_far)" in result
+    assert "sum += ripple_shuffle(" in result
+
+
+@pytest.mark.parametrize("intrinsic,arg_name", [
+    ("__shfl_xor_sync", "lane_mask"),
+    ("__shfl_up_sync", "delta"),
+    ("__shfl_down_sync", "delta"),
+    ("__shfl_sync", "src_lane"),
+])
+def test_ternary_dispatch_resolves_across_all_four_intrinsics(intrinsic, arg_name):
+    # Proves the rule's shared _INTRINSIC alternation actually covers
+    # all 4 shuffle intrinsics, not just the one used in the other tests.
+    source = f"""
+__global__ void kernel(float *data, int lane, int cond) {{
+    float val = data[lane];
+    float result = {intrinsic}(0xffffffff, val, cond ? 3 : 5);
+    data[lane] = result;
+}}
+"""
+    result = translate_cuda_source(source)
+    assert intrinsic not in result
+    assert result.count("ripple_shuffle(") == 2
+
+
+def test_ternary_dispatch_declines_when_a_branch_is_not_constant():
+    # CRITICAL correctness guard: if either ternary branch references a
+    # kernel-local variable rather than a literal, the value set is no
+    # longer provably static (it could be anything 'n' takes at
+    # runtime) — this rule must decline entirely (leave the ternary
+    # untouched) rather than guess, same "decline rather than guess"
+    # convention as every other rule in this file's shuffle-handling
+    # family. The untouched ternary then correctly reaches
+    # ShuffleXorRule, which hard-fails on it exactly as it does today.
+    source = """
+__global__ void kernel(float *data, int lane, int n) {
+    float val = data[lane];
+    float neighbor = __shfl_xor_sync(0xffffffff, val, lane < 16 ? n : 2);
+    data[lane] = neighbor;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    with pytest.raises(TranslationError) as exc_info:
+        transformer.transform(source)
+    assert "not a compile-time constant" in str(exc_info.value)
+
+
+def test_ternary_dispatch_declines_on_nested_ternary():
+    # A 3-way (or more) chained ternary is out of scope for this rule —
+    # LIT_B ('cond2 ? 5 : 7') contains '?'/':' and fails
+    # _is_compile_time_constant_expr, so this rule declines and the
+    # untouched (outer) ternary reaches ShuffleXorRule, which hard-fails.
+    # This is a deliberate bail-out, not a translation attempt — see the
+    # rule's docstring.
+    source = """
+__global__ void kernel(float *data, int lane, int cond1, int cond2) {
+    float val = data[lane];
+    float neighbor = __shfl_xor_sync(0xffffffff, val, cond1 ? 3 : cond2 ? 5 : 7);
+    data[lane] = neighbor;
+}
+"""
+    ctx = TranslationContext()
+    transformer = CUDAToRIPPLETransformer(ctx)
+    with pytest.raises(TranslationError):
+        transformer.transform(source)
+
+
+def test_ternary_dispatch_passes_through_width_argument():
+    source = """
+__global__ void kernel(float *data, int lane, int wide) {
+    float val = data[lane];
+    float r = __shfl_sync(0xffffffff, val, wide ? 0 : 1, 16);
+    data[lane] = r;
+}
+"""
+    result = translate_cuda_source(source)
+    assert result.count("ripple_shuffle(") == 2
+    hoisted_bodies = re.findall(r'return \((\d+)\);', result)
+    assert sorted(int(v) for v in hoisted_bodies) == [0, 1]
+
+
+@requires_clang
+def test_ternary_dispatch_output_passes_syntax_check():
+    source = """
+__global__ void kernel(float *data, int lane) {
+    float val = data[lane];
+    float neighbor = __shfl_xor_sync(0xffffffff, val, lane < 16 ? 1 : 2);
+    data[lane] = neighbor;
+}
+"""
+    result = translate_cuda_source(source)
+    success, output = verify_ripple_syntax(result)
+    assert success, output
+
+
 def test_predicated_unroll_does_not_collide_with_plain_unroll_rule():
     # A plain (non-compound-condition) loop must still go through
     # UnrollConstantShuffleLoopRule exactly as before — the new rule's

@@ -774,6 +774,214 @@ class PredicatedShuffleUnrollRule(TranslationRule):
         return result
 
 
+class TernaryDispatchShuffleArgumentRule(TranslationRule):
+    """
+    Resolves a shuffle argument that is a two-way, compile-time-constant
+    ternary (`COND ? LITERAL_A : LITERAL_B`) by splitting the single
+    dynamic call into two statically-argument'd calls behind an if/else
+    on COND — the non-loop sibling of UnrollConstantShuffleLoopRule
+    (GitHub issue #11). Where that rule resolves a shuffle argument
+    whose value set is fixed by a loop's literal bounds, this rule
+    resolves one whose value set is fixed to exactly two literals by a
+    ternary, with COND deciding at runtime which literal applies. Same
+    principle as PredicatedShuffleUnrollRule's docstring: a provably
+    static VALUE SET, runtime-decided WHICH member of it — never a
+    genuinely unbounded runtime value, which is still correctly a hard
+    fail (ripple_shuffle's permutation function is file-scope and
+    cannot close over a runtime value at all — see
+    _is_compile_time_constant_expr's docstring).
+
+    Matches two statement shapes feeding any of the 4 shuffle
+    intrinsics (__shfl_sync, __shfl_down_sync, __shfl_up_sync,
+    __shfl_xor_sync):
+      TYPE VAR = INTRINSIC(mask, value, COND ? LIT_A : LIT_B[, width]);
+      VAR (=|+=|-=|*=|/=) INTRINSIC(mask, value, COND ? LIT_A : LIT_B[, width]);
+    Emits, respectively:
+      TYPE VAR;
+      if (COND) { VAR = INTRINSIC(mask, value, LIT_A[, width]); }
+      else { VAR = INTRINSIC(mask, value, LIT_B[, width]); }
+    or (assignment form, no separate declaration):
+      if (COND) { VAR OP INTRINSIC(mask, value, LIT_A[, width]); }
+      else { VAR OP INTRINSIC(mask, value, LIT_B[, width]); }
+    Runs at priority 75 — above the shuffle rules (70), so the two
+    literal-argument INTRINSIC calls this rule emits are still present,
+    unconsumed, when the shuffle rules get their turn in the same pass
+    (TranslationRuleEngine.apply_all runs each registered rule exactly
+    once, highest priority first) and hoist a real ripple_shuffle
+    permutation function for each branch, same as any other
+    literal-argument call.
+
+    LIT_A and LIT_B must each independently pass
+    _is_compile_time_constant_expr — reused directly rather than
+    re-derived, same rationale as PredicatedShuffleUnrollRule's
+    docstring: that check went through review-driven hardening to get
+    its digit/operator/paren-balance handling right. COND is NOT
+    constrained the same way — it's expected to be a genuine runtime
+    expression (that's the entire point of this rule), and is spliced
+    into the emitted if/else verbatim. The declaration-form pattern's
+    TYPE capture is intentionally imprecise about where a multi-word
+    type ends (identical ambiguity to DeviceFunctionRule's existing
+    `[\w\s\*]+` type capture elsewhere in this file) — this
+    translator is pattern-based throughout, not a real C parser.
+
+    Unlike UnrollConstantShuffleLoopRule/PredicatedShuffleUnrollRule,
+    this rule's capture is a single statement terminated by the first
+    `;` after the call's closing `)` — it never spans a `{...}` block,
+    so the invisible brace/comment-swallowing risk those two classes
+    guard against (see UnrollConstantShuffleLoopRule's docstring)
+    structurally cannot happen here; no UNSAFE_BODY_TOKENS-style guard
+    is needed.
+
+    Known limitation, a deliberate bail-out and not a translation
+    attempt: a nested/chained ternary (`COND1 ? A : COND2 ? B : C`)
+    does not pass LIT_B's compile-time-constant-only check (it contains
+    `?`/`:`), so this rule declines entirely and the original text
+    reaches the shuffle rules unchanged, which correctly hard-fail on
+    it — same "decline rather than guess" convention as every other
+    rule in this file's shuffle-handling family. A 2-way ternary is the
+    common case (a data-dependent binary choice of neighbor/stride) and
+    the one this rule targets.
+    """
+
+    _INTRINSIC = r'__shfl(?:_(?:down|up|xor))?_sync'
+
+    # Group numbers noted per pattern below — the two patterns are
+    # matched and substituted independently, each with its own group
+    # numbering, not shared.
+
+    # TYPE VAR = INTRINSIC(mask, value, COND ? LIT_A : LIT_B[, width]);
+    #   1: TYPE   2: VAR   3: INTRINSIC name   4: mask   5: value
+    #   6: COND   7: LIT_A   8: LIT_B   9: optional width
+    PATTERN_DECL = (
+        r'(\w[\w\s\*]*?)\s+(\w+)\s*=\s*'
+        r'(' + _INTRINSIC + r')\s*\(\s*'
+        r'([^,]+),\s*([^,]+),\s*'
+        r'([^,\)\?]+?)\s*\?\s*([^,\):]+?)\s*:\s*([^,\)]+?)\s*'
+        r'(?:,\s*([^)]+))?\)\s*;'
+    )
+
+    # VAR (=|+=|-=|*=|/=) INTRINSIC(mask, value, COND ? LIT_A : LIT_B[, width]);
+    #   1: VAR   2: assign op   3: INTRINSIC name   4: mask   5: value
+    #   6: COND   7: LIT_A   8: LIT_B   9: optional width
+    PATTERN_ASSIGN = (
+        r'(\w+)\s*(\+=|-=|\*=|/=|=)\s*'
+        r'(' + _INTRINSIC + r')\s*\(\s*'
+        r'([^,]+),\s*([^,]+),\s*'
+        r'([^,\)\?]+?)\s*\?\s*([^,\):]+?)\s*:\s*([^,\)]+?)\s*'
+        r'(?:,\s*([^)]+))?\)\s*;'
+    )
+
+    # Kept for stylistic consistency with every other rule class in this
+    # file (each defines a `PATTERN` attribute) — not actually read
+    # anywhere for this class specifically, since matches()/apply()
+    # below explicitly use PATTERN_DECL/PATTERN_ASSIGN instead.
+    PATTERN = PATTERN_ASSIGN
+
+    def __init__(self):
+        super().__init__(
+            name="ternary_dispatch_shuffle_argument",
+            description="Dispatch a two-way compile-time-constant ternary shuffle argument into an if/else calling two literal-argument shuffle intrinsics",
+            cuda_pattern=self.PATTERN_ASSIGN,
+            priority=75  # Below PredicatedShuffleUnrollRule (81) /
+                         # UnrollConstantShuffleLoopRule (82) — those
+                         # match a for-loop shape, structurally disjoint
+                         # from this rule's statement shape, so ordering
+                         # relative to them doesn't affect correctness.
+                         # Must be above the shuffle rules (70) so the
+                         # two literal-argument calls this rule emits
+                         # are still unconsumed text when the shuffle
+                         # rules get their turn in the same pass.
+        )
+
+    def matches(self, cuda_code: str) -> bool:
+        return bool(
+            re.search(self.PATTERN_DECL, cuda_code)
+            or re.search(self.PATTERN_ASSIGN, cuda_code)
+        )
+
+    @staticmethod
+    def _build_calls(intrinsic, mask, value, lit_a, lit_b, width):
+        width_arg = f", {width.strip()}" if width else ""
+        true_call = f"{intrinsic}({mask}, {value}, {lit_a}{width_arg})"
+        false_call = f"{intrinsic}({mask}, {value}, {lit_b}{width_arg})"
+        return true_call, false_call
+
+    def _replace_decl(self, match, ctx: TranslationContext) -> str:
+        type_ = match.group(1).strip()
+        var = match.group(2)
+        intrinsic = match.group(3)
+        mask = match.group(4).strip()
+        value = match.group(5).strip()
+        cond = match.group(6).strip()
+        lit_a = match.group(7).strip()
+        lit_b = match.group(8).strip()
+        width = match.group(9)
+
+        if not (_is_compile_time_constant_expr(lit_a)
+                and _is_compile_time_constant_expr(lit_b)):
+            # Not a provably static 2-value domain — leave untouched so
+            # the shuffle rules hard-fail on the intact ternary, same
+            # as any other unresolvable argument.
+            return match.group(0)
+
+        true_call, false_call = self._build_calls(
+            intrinsic, mask, value, lit_a, lit_b, width
+        )
+        ctx.add_warning(
+            f"Dispatched a two-way ternary shuffle argument for '{var}' "
+            f"into an if/else with two literal-argument shuffle calls"
+        )
+        return (
+            f"{type_} {var};\n"
+            f"    if ({cond}) {{ {var} = {true_call}; }} "
+            f"else {{ {var} = {false_call}; }}"
+        )
+
+    def _replace_assign(self, match, ctx: TranslationContext) -> str:
+        var = match.group(1)
+        assign_op = match.group(2)
+        intrinsic = match.group(3)
+        mask = match.group(4).strip()
+        value = match.group(5).strip()
+        cond = match.group(6).strip()
+        lit_a = match.group(7).strip()
+        lit_b = match.group(8).strip()
+        width = match.group(9)
+
+        if not (_is_compile_time_constant_expr(lit_a)
+                and _is_compile_time_constant_expr(lit_b)):
+            return match.group(0)
+
+        true_call, false_call = self._build_calls(
+            intrinsic, mask, value, lit_a, lit_b, width
+        )
+        ctx.add_warning(
+            f"Dispatched a two-way ternary shuffle argument for '{var}' "
+            f"into an if/else with two literal-argument shuffle calls"
+        )
+        return (
+            f"if ({cond}) {{ {var} {assign_op} {true_call}; }} "
+            f"else {{ {var} {assign_op} {false_call}; }}"
+        )
+
+    def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
+        # Declaration form first — it fully consumes "TYPE VAR = ..."
+        # including the TYPE text, so nothing is left for the
+        # assignment-only pattern to accidentally re-match on the same
+        # call once this pass is done.
+        result = re.sub(
+            self.PATTERN_DECL,
+            lambda m: self._replace_decl(m, ctx),
+            cuda_code
+        )
+        result = re.sub(
+            self.PATTERN_ASSIGN,
+            lambda m: self._replace_assign(m, ctx),
+            result
+        )
+        return result
+
+
 class ShuffleDownRule(TranslationRule):
     """Translates __shfl_down_sync to ripple_shuffle."""
     
@@ -1486,6 +1694,7 @@ class TranslationRuleEngine:
             ButterflyAllReduceRule(),
             UnrollConstantShuffleLoopRule(),
             PredicatedShuffleUnrollRule(),
+            TernaryDispatchShuffleArgumentRule(),
             ShuffleDownRule(),
             ShuffleUpRule(),
             ShuffleXorRule(),
