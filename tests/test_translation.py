@@ -1391,6 +1391,31 @@ __global__ void kernel(float *data, int lane, int use_far) {
     assert "sum += ripple_shuffle(" in result
 
 
+def test_ternary_dispatch_resolves_plain_reassignment_form():
+    # Third statement shape PATTERN_ASSIGN claims to support: a plain
+    # '=' reassignment to an already-declared variable, with no type
+    # prefix and no compound-assign operator — distinct from both the
+    # declaration form (fresh TYPE VAR = ...) and the compound-assign
+    # form (VAR += ...) already covered above. Proves PATTERN_DECL's
+    # "requires two identifiers before '='" gate correctly does NOT
+    # swallow this shape, and PATTERN_ASSIGN's bare '=' alternative
+    # correctly does.
+    source = """
+__global__ void kernel(float *data, int lane, int use_far) {
+    float val;
+    val = __shfl_xor_sync(0xffffffff, val, use_far ? 4 : 2);
+    data[lane] = val;
+}
+"""
+    result = translate_cuda_source(source)
+    assert "__shfl_xor_sync" not in result
+    assert result.count("ripple_shuffle(") == 2
+    assert "if (use_far)" in result
+    assert "val = ripple_shuffle(" in result
+    hoisted_bodies = re.findall(r'return k \^ \((\d+)\);', result)
+    assert sorted(int(v) for v in hoisted_bodies) == [2, 4]
+
+
 @pytest.mark.parametrize("intrinsic,arg_name", [
     ("__shfl_xor_sync", "lane_mask"),
     ("__shfl_up_sync", "delta"),
