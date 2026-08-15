@@ -1691,6 +1691,29 @@ class TestBoilerplateGeneration:
         result = translate_cuda_source(cuda_code)
         assert "-fenable-ripple" in result
 
+    def test_math_h_included_for_translated_math_intrinsics(self):
+        """MathFunctionRule translates CUDA math intrinsics (__expf,
+        __sqrtf_rn, etc.) to plain libm names like expf/sqrtf, which are
+        declared in <math.h> — without it, clang rejects the call with
+        'call to undeclared library function' under -std=c99 and later
+        (confirmed directly: this exact kernel failed to compile before
+        <math.h> was added to the boilerplate)."""
+        assert "#include <math.h>" in translate_cuda_source(
+            "__global__ void k(float *a) { a[0] = 1.0f; }"
+        )
+
+    @requires_clang
+    def test_translated_math_intrinsic_output_passes_syntax_check(self):
+        source = """
+__global__ void k(float *a, float *b) {
+    int idx = threadIdx.x;
+    b[idx] = __expf(a[idx]);
+}
+"""
+        result = translate_cuda_source(source)
+        success, output = verify_ripple_syntax(result)
+        assert success, output
+
 
 # =============================================================================
 # Run Tests

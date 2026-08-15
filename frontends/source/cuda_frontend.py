@@ -582,6 +582,7 @@ class CUDAToRIPPLETransformer:
 #include <ripple.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <math.h>
 
 /* Hexagon-specific includes */
 #ifdef __HEXAGON__
