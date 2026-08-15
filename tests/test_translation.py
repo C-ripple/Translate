@@ -149,6 +149,26 @@ class TestTranslationRules:
         assert ctx.has_errors()
         assert "tile" in ctx.errors[0]
 
+    def test_shared_memory_rule_early_return_hard_fails(self):
+        """A 'return' between the __shared__ declaration and the enclosing
+        block's end would leak the VTCM allocation on that path — VTCM is
+        a small, real hardware scratchpad, not virtual memory. Must
+        hard-fail rather than silently leak."""
+        rule = SharedMemoryRule()
+        ctx = TranslationContext(target_platform="hexagon")
+
+        source = (
+            "void k(int n) {\n"
+            "    __shared__ float sdata[256];\n"
+            "    if (n < 0) return;\n"
+            "    sdata[0] = 1.0f;\n"
+            "}"
+        )
+        result = rule.apply(source, ctx)
+
+        assert ctx.has_errors()
+        assert "sdata" in ctx.errors[0]
+
     def test_atomic_add_rule(self):
         """atomicAdd has no Ripple equivalent outside a recognized
         reduction idiom (handled separately by WarpReductionRule etc.) —

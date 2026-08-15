@@ -185,6 +185,7 @@ class SharedMemoryRule(TranslationRule):
     # untranslated declarations, so it inherits the same array-only scope.
     PATTERN = r'__shared__\s+(\w+)\s+(\w+)\s*\[([^\]]*)\]'
     EXTRA_DIM_PATTERN = re.compile(r'\s*\[[^\]]*\]')
+    RETURN_PATTERN = re.compile(r'\breturn\b')
 
     def __init__(self):
         super().__init__(
@@ -196,7 +197,24 @@ class SharedMemoryRule(TranslationRule):
 
     @staticmethod
     def _find_enclosing_brace_end(text: str, start: int) -> int:
-        """Find the index of the '}' that closes the block containing `start`."""
+        """Find the index of the '}' that closes the block containing `start`.
+
+        Counts every '{'/'}' character with no awareness of string/char
+        literals or comments — a brace inside either would misplace the
+        result. No kernel in this codebase's test suite currently
+        triggers this (verified: none have a comment or string literal
+        containing a brace between a surviving __shared__ declaration and
+        its enclosing '}'), but it's a real limitation, not a
+        theoretical one — the same bug class UnrollConstantShuffleLoopRule
+        needed several hardening rounds to close for its own, narrower
+        scan region. A blanket bail-out on any comment/string in range
+        isn't the right fix here: unlike that rule's small loop-body
+        scan, this method's scan region is often an entire kernel body,
+        where real kernels routinely contain comments — bailing out on
+        their mere presence would hard-fail legitimate kernels. Making
+        this scanner literal/comment-aware is a real fix but a separately
+        scoped one.
+        """
         depth = 0
         i = start
         while i < len(text):
@@ -252,6 +270,21 @@ class SharedMemoryRule(TranslationRule):
                     f"{var_name}[{size_expr}]' — cannot place its matching "
                     f"vtcm_free() call. Check for unbalanced braces in the "
                     f"kernel."
+                )
+                continue
+
+            if self.RETURN_PATTERN.search(result, match.end(), free_pos):
+                ctx.add_error(
+                    f"SharedMemoryRule: '{var_name}' is followed by a "
+                    f"'return' before the end of its enclosing block. "
+                    f"Placing vtcm_free('{var_name}') only at the block's "
+                    f"closing brace would leak the VTCM allocation on "
+                    f"that early-return path — VTCM is a small, real "
+                    f"hardware scratchpad, not virtual memory. "
+                    f"Restructure the kernel so '{var_name}' is freed on "
+                    f"every exit path (e.g. move any early-exit checks "
+                    f"before the __shared__ declaration, not after it), "
+                    f"and retranslate."
                 )
                 continue
 
