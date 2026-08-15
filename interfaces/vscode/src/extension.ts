@@ -51,9 +51,10 @@ class LocalTranslator {
         this.config = config;
     }
 
-    translate(cudaCode: string): { output: string; warnings: string[] } {
+    translate(cudaCode: string): { output: string; warnings: string[]; errors: string[] } {
         let output = cudaCode;
         const warnings: string[] = [];
+        const errors: string[] = [];
 
         // Thread index
         output = output.replace(/threadIdx\.x/g, 'ripple_id(ripple_block, 0)');
@@ -80,24 +81,49 @@ class LocalTranslator {
         // Device function
         output = output.replace(/__device__\s+/g, 'static inline ');
 
-        // Shared memory
+        // Shared memory: real Ripple VTCM access is vtcm_malloc()/vtcm_free()
+        // (see core/translation_rules.py's SharedMemoryRule), which needs a
+        // brace-counting scan to place the matching free() call correctly —
+        // more than this quick in-editor translator implements. Rather than
+        // duplicate that algorithm a second time in a codebase already
+        // flagged above for eventual replacement, hard-fail and point at the
+        // CLI/web UI, which do support it.
         output = output.replace(
             /__shared__\s+(\w+)\s+(\w+)\s*\[([^\]]*)\]/g,
-            '__attribute__((section(".vtcm"))) __attribute__((aligned(128))) $1 $2[$3]'
+            (match, elemType, varName) => {
+                errors.push(
+                    `__shared__ ${elemType} ${varName}[...] cannot be translated by this in-editor translator — ` +
+                    `VTCM allocation (vtcm_malloc/vtcm_free) needs correct placement of a matching free() call, ` +
+                    `which this quick translator doesn't implement. Use the CLI (cuda2ripple source ...) or the ` +
+                    `web UI instead.`
+                );
+                return match;
+            }
         );
 
         // Sync
         output = output.replace(/__syncthreads\s*\(\s*\)/g, '/* __syncthreads: implicit in SIMD */');
 
-        // Atomics
-        output = output.replace(/atomicAdd\s*\(/g, 'ripple_atomic_add(');
+        // Atomics: Ripple has no atomics API at all (confirmed against the
+        // Ripple multi-threading guide) — there is no real ripple_atomic_add
+        // to translate to.
+        output = output.replace(
+            /atomicAdd\s*\(\s*([^,]+),\s*([^)]+)\)/g,
+            (match, target, value) => {
+                errors.push(
+                    `atomicAdd(${target.trim()}, ${value.trim()}) cannot be translated — Ripple has no atomics ` +
+                    `API. See the barrier + per-lane partial-sum pattern in the Ripple multi-threading guide.`
+                );
+                return match;
+            }
+        );
 
         // Warnings
         if (cudaCode.includes('cooperative_groups')) {
             warnings.push('Cooperative groups require manual translation');
         }
 
-        return { output: this.generateHeader() + output, warnings };
+        return { output: this.generateHeader() + output, warnings, errors };
     }
 
     private generateHeader(): string {
@@ -108,7 +134,6 @@ class LocalTranslator {
 #include <stdint.h>
 
 #define HVX_VECTOR_SIZE ${this.config.hvxWidth}
-#define ripple_atomic_add(ptr, val) __builtin_atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST)
 
 `;
     }
@@ -131,6 +156,11 @@ async function translateSelection(editor: vscode.TextEditor) {
     const translator = new LocalTranslator(config);
     const result = translator.translate(text);
 
+    if (result.errors.length > 0) {
+        vscode.window.showErrorMessage(result.errors.join('\n'));
+        return;
+    }
+
     if (result.warnings.length > 0) {
         vscode.window.showWarningMessage(result.warnings.join('\n'));
     }
@@ -148,6 +178,11 @@ async function translateFile() {
     const text = editor.document.getText();
     const translator = new LocalTranslator(config);
     const result = translator.translate(text);
+
+    if (result.errors.length > 0) {
+        vscode.window.showErrorMessage(result.errors.join('\n'));
+        return;
+    }
 
     const newDoc = await vscode.workspace.openTextDocument({
         content: result.output,
