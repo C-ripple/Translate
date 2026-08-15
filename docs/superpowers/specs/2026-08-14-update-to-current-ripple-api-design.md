@@ -90,6 +90,25 @@ Rewrite `SharedMemoryRule` to:
 as-is: it already warns and passes through without claiming a fake translation, and
 Ripple has no launch-time-size equivalent to translate it to.
 
+**Multi-dimensional arrays are a hard-fail, not silently broken.** The old
+attribute-based rule tolerated `__shared__ float tile[18][18]` by accident — it only
+ever rewrote the prefix up to the first `[dim]`, leaving the second `[18]` as trailing
+array-declarator syntax, which is valid C for a real array. A `vtcm_malloc()`-returned
+pointer can't be redeclared with a trailing `[dim]` the same way, and every
+`tile[ty][tx]`-style indexing expression elsewhere in the kernel would need rewriting to
+flat pointer arithmetic — an AST-level transformation, not something safe to do with
+regex substitution. `SharedMemoryRule` must detect a second `[...]` immediately after
+the matched declaration and `ctx.add_error()` instead of translating it, rather than
+emit array-declarator syntax after an initializer (a compile error). This is a real,
+if narrow, capability loss versus today for kernels using 2D+ shared tiles — flagging
+it here rather than discovering it silently in the implementation. Found while writing
+the implementation plan: `tests/test_complex_kernels.py::test_2d_convolution` exercises
+exactly this case (`__shared__ float tile[18][18]`) but only asserts on `ripple_id`
+output, not shared-memory output, so it currently passes without really exercising 2D
+correctness — that test's kernel needs simplifying to drop the shared-memory tile (its
+actual point is 2D thread-index translation), and a new dedicated test should assert the
+multi-dimensional case hard-fails with a clear diagnostic.
+
 ### 3. `__sad` — rename, don't remove
 
 No real Ripple equivalent exists (confirmed: zero hits for `sad` anywhere in
