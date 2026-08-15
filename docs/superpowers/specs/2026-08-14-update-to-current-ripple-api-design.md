@@ -131,7 +131,10 @@ supplemented with new ones:
   `ripple_sad` and `ripple_atomic_add` in one kernel; the `atomicAdd` there is a bare
   per-thread call, not the recognized block-reduction idiom, so it becomes a hard-fail
   case while the `__sad` part becomes a `cripple_sad` rename — split into two tests).
-- `tests/test_translation.py`: `test_atomic_add_rule`.
+- `tests/test_translation.py`: `test_atomic_add_rule` (asserts `ripple_atomic_add` from a
+  direct `AtomicAddRule().apply()` call) and `test_shared_memory_rule` (asserts the old
+  `__attribute__((aligned(128)))` + array-declaration output from a direct
+  `SharedMemoryRule().apply()` call — needs rewriting to assert the `vtcm_malloc` form).
 
 Additional new coverage:
 - One hard-fail fixture each for `AtomicMaxRule`/`AtomicCASRule`/`AtomicExchRule` beyond
