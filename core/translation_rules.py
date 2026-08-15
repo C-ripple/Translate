@@ -1702,7 +1702,7 @@ class MathFunctionRule(TranslationRule):
         '__ffsll': '__builtin_ffsll',
         '__brev': '__builtin_bitreverse32',
         '__brevll': '__builtin_bitreverse64',
-        '__sad': 'ripple_sad',  # We'll define a macro for this
+        '__sad': 'cripple_sad',  # Translator-provided helper — no real Ripple SAD primitive exists
     }
     
     PATTERN = r'(' + '|'.join(re.escape(k) for k in MATH_MAP.keys()) + r')\s*\('

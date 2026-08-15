@@ -338,23 +338,40 @@ class TestImageProcessing:
         assert "ripple_id(ripple_block" in result
         assert "block_idx_x" in result and "block_idx_y" in result
     
-    def test_sad_computation(self):
-        """Test Sum of Absolute Differences."""
+    def test_sad_rename(self):
+        """__sad has no real Ripple equivalent — it translates to the
+        translator's own cripple_sad helper, not a ripple_-prefixed name
+        that would imply a real API symbol."""
+        cuda_code = """
+        __global__ void compute_sad_only(unsigned char *img1, unsigned char *img2,
+                                         int *out, int N) {
+            int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            if (idx < N) {
+                out[idx] = __sad(img1[idx], img2[idx], 0);
+            }
+        }
+        """
+
+        result = translate_cuda_source(cuda_code)
+        assert "cripple_sad(" in result
+
+    def test_sad_with_bare_atomic_add_fails(self):
+        """A bare per-thread atomicAdd (not a recognized block-reduction
+        idiom) has no Ripple equivalent, independent of the __sad rename."""
         cuda_code = """
         __global__ void compute_sad(unsigned char *img1, unsigned char *img2,
                                     int *sad, int N) {
             int idx = blockIdx.x * blockDim.x + threadIdx.x;
-            
+
             if (idx < N) {
                 int local_sad = __sad(img1[idx], img2[idx], 0);
                 atomicAdd(sad, local_sad);
             }
         }
         """
-        
-        result = translate_cuda_source(cuda_code)
-        assert "ripple_sad" in result
-        assert "ripple_atomic_add" in result
+
+        with pytest.raises(TranslationError):
+            translate_cuda_source(cuda_code)
 
 
 class TestEdgeCases:
