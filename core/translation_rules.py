@@ -10,7 +10,10 @@ Key Mappings:
     CUDA blockDim.{x,y,z}   ->  ripple_get_block_size(block, {0,1,2})
     CUDA __shared__         ->  vtcm_malloc()/vtcm_free() (Hexagon)
     CUDA __syncthreads()    ->  implicit (SIMD model) or explicit barrier
-    CUDA atomicAdd          ->  ripple_reduction or HVX scatter-accumulate
+    CUDA atomicAdd          ->  no equivalent — hard-fails (see the Ripple
+                                 multi-threading guide's barrier + partial-sum
+                                 pattern), except the recognized block-reduction
+                                 idiom, which maps to ripple_reduceadd
     CUDA warp shuffles      ->  ripple_shuffle with permutation function
 """
 

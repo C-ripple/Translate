@@ -352,7 +352,7 @@ __global__ void reduce_sum(float *input, float *output, int n) {
     }
     
     if (tid == 0) {
-        atomicAdd(output, sdata[0]);
+        output[0] = sdata[0];
     }
 }</textarea>
             </div>
