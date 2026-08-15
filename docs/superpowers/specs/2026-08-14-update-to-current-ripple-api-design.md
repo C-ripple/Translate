@@ -66,6 +66,27 @@ Also remove the `ripple_atomic_add/max/min/cas/exch` macro `#define`s from
 `_add_ripple_boilerplate()`'s generated header — they reference nonexistent Ripple
 concepts and should never appear in output now that nothing calls them.
 
+**Found during implementation: the "reduction idiom already handles this" claim above is
+narrower than it sounds.** `WarpReductionRule` only rewrites the shuffle-loop itself
+(`val = ripple_reduceadd(0b1, val);`) — it does not consume a trailing
+`if (tid == 0) { atomicAdd(output, val); }` statement, which is the standard way a
+warp's fully-reduced value gets written into a shared/global accumulator. That trailing
+call now hard-fails under this plan, same as any other atomicAdd. This is correct, not a
+bug to route around: real Ripple has no atomics, and — confirmed directly by grepping the
+codebase — `restructure_kernel()` (the function that would turn CUDA's grid-of-blocks
+into an explicit loop, which is the only context in which "is this genuinely
+multi-writer" could be answered) is dead code, never called anywhere. `BlockIdxRule`
+today just substitutes `blockIdx.x` → the bare identifier `block_idx_x`, which is never
+declared or assigned — a pre-existing, unrelated bug confirming multi-block execution
+isn't actually modeled yet. With no way to know whether a kernel launches one block or
+many, there's no safe automatic rewrite (a plain `+=` would be silently wrong for any
+kernel that really does launch multiple blocks) — hard-failing is the only honest option
+until block/grid restructuring is separately fixed. Three additional existing tests need
+the same hard-fail conversion as a result: `tests/test_complex_kernels.py::TestReductionKernels::test_warp_reduction_optimization`
+and, in `tests/test_real_kernels.py`, the `atomics_cas_exch.cu` fixture (both parametrized
+tests) and the `cuda_kernels.cu` fixture's `test_translates_without_error` case (it
+contains 5 unrelated atomic call sites).
+
 ### 2. VTCM / shared memory — real `vtcm_malloc`/`vtcm_free`
 
 `SharedMemoryRule` currently emits `__attribute__((section(".vtcm")))`, which does not
