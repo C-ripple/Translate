@@ -1173,16 +1173,181 @@ help/instructions surface today)."
 
 ---
 
-## Task 6: Final end-to-end verification
+## Task 6: Documentation cleanup and final end-to-end verification
 
-**Files:** None modified — verification only.
+**Files:**
+- Modify: `README.md`, `docs/README.md` (byte-identical copy — confirmed via `diff`;
+  keep them in sync, don't investigate why both exist, that's unrelated pre-existing
+  repo structure)
+- Modify: `docs/ARCHITECTURE.md`
+- Modify: `tests/test_translation.py` (two stale comments)
 
-- [ ] **Step 1: Run the full test suite**
+Code-quality review of Task 2 surfaced real documentation staleness that no other task's
+file list covers: `README.md`/`docs/README.md`/`docs/ARCHITECTURE.md` all document
+`atomicAdd(ptr, val)` translating to `ripple_atomic_add(ptr, val)` (Task 2 made this
+false — it now hard-fails), and `README.md`'s "Parallel Reduction" worked example ends
+with exactly that pattern. The same tables also document `__shared__ T arr[N]`
+translating to `__attribute__((section(".vtcm"))) T arr[N]` (Task 4 makes this false too
+— it's `vtcm_malloc`/`vtcm_free` now). Fixing this here, after Tasks 2-5 have all landed,
+avoids editing these files twice.
+
+- [ ] **Step 1: Fix the translation-mapping tables and worked example**
+
+In `README.md`, replace these two table rows (in the "Translation Mappings" section):
+
+```markdown
+| `__shared__ T arr[N]` | `__attribute__((section(".vtcm"))) T arr[N]` |
+| `atomicAdd(ptr, val)` | `ripple_atomic_add(ptr, val)` |
+```
+
+with:
+
+```markdown
+| `__shared__ T arr[N]` | `T *arr = vtcm_malloc(sizeof(T) * N, /*align_as=*/128); ... vtcm_free(arr);` |
+| `atomicAdd(ptr, val)` | *(no equivalent — Ripple has no atomics API; see the barrier + per-lane partial-sum pattern in the Ripple multi-threading guide)* |
+```
+
+Then replace the "Parallel Reduction" worked example (the `### Parallel Reduction`
+section, both the CUDA Input and RIPPLE Output code blocks) with:
+
+```markdown
+### Parallel Reduction
+
+**CUDA Input:**
+```cuda
+__global__ void reduceSum(float *input, float *output, int n) {
+    __shared__ float sdata[256];
+    int tid = threadIdx.x;
+    sdata[tid] = input[tid];
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) output[0] = sdata[0];
+}
+```
+
+**RIPPLE Output:**
+```c
+#include <ripple.h>
+
+void reduceSum_ripple(...) {
+    float *sdata = vtcm_malloc(sizeof(float) * (256), /*align_as=*/128);
+
+    ripple_block_t ripple_block = ripple_set_block_shape(HVX_PE, 256);
+    int tid = ripple_id(ripple_block, 0);
+    sdata[tid] = input[tid];
+    // __syncthreads: implicit in SIMD model
+
+    for (int s = ripple_get_block_size(ripple_block, 0) / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+    }
+    if (tid == 0) output[0] = sdata[0];
+    vtcm_free(sdata);
+}
+```
+
+Note this example writes the block's single reduced value directly rather than using
+`atomicAdd` — Ripple has no atomics API, so accumulating across *multiple* blocks into
+one shared output needs the barrier + per-lane partial-sum pattern from the Ripple
+multi-threading guide instead; see the Translation Mappings table above.
+```
+
+Copy the fully-edited `README.md` over `docs/README.md` (`cp README.md docs/README.md`)
+to preserve their current byte-identical state.
+
+In `docs/ARCHITECTURE.md`, replace these two table rows:
+
+```markdown
+| `__shared__` | VTCM-allocated array | Hexagon tightly-coupled memory |
+| `atomicAdd()` | `ripple_atomic_add()` | Or HVX scatter-accumulate |
+```
+
+with:
+
+```markdown
+| `__shared__` | `vtcm_malloc()`/`vtcm_free()` pair | Hexagon tightly-coupled memory |
+| `atomicAdd()` | *(no equivalent)* | Ripple has no atomics API — see the barrier + per-lane partial-sum pattern in the Ripple multi-threading guide |
+```
+
+- [ ] **Step 2: Fix two stale test comments**
+
+In `tests/test_translation.py`, around line 1370, replace this comment (keep the
+assertions below it unchanged — only the comment text is stale):
+
+```python
+    # NOTE: deliberately not "?" not in result — like the "if (" note on
+    # test_predicated_unroll_does_not_collide_with_plain_unroll_rule
+    # above, the RIPPLE boilerplate unconditionally emits a
+    # ripple_atomic_cas fallback macro containing a '?' ternary, so
+    # that check would fail for any translation output regardless of
+    # this rule's behavior. Assert directly on the original ternary
+    # being gone from the kernel body instead.
+```
+
+with:
+
+```python
+    # NOTE: deliberately not "?" not in result — asserting the original
+    # ternary is gone from the kernel body is a more direct check than a
+    # blanket "no '?' anywhere in the file" assertion regardless. (This
+    # comment previously cited a since-removed ripple_atomic_cas fallback
+    # macro that also contained a '?' as the reason — that macro no
+    # longer exists, but the more-direct assertion below is still the
+    # better check on its own merits.)
+```
+
+Around line 1531, replace this comment (same rule — keep the assertions unchanged):
+
+```python
+    # NOTE: deliberately not "if (" not in result — the RIPPLE
+    # boilerplate header unconditionally emits ripple_atomic_max/min
+    # macros containing "if (", so that check would fail for any
+    # translation output regardless of this rule's behavior. Assert
+    # directly on which rule's warning fired instead.
+```
+
+with:
+
+```python
+    # NOTE: deliberately not "if (" not in result — asserting on which
+    # rule's warning fired is a more direct, less brittle check than a
+    # blanket "no 'if (' anywhere in the file" assertion regardless.
+    # (This comment previously cited since-removed ripple_atomic_max/min
+    # fallback macros that also contained "if (" as the reason — those
+    # macros no longer exist, but the more-direct assertion below is
+    # still the better check on its own merits.)
+```
+
+- [ ] **Step 3: Run the full test suite to confirm no regressions**
+
+Run: `venv/bin/python -m pytest -v`
+Expected: All tests pass, 0 failures, 0 errors (same count as after Task 5 — this step
+only touched docs and comments, no behavior).
+
+- [ ] **Step 4: Commit the documentation cleanup**
+
+```bash
+git add README.md docs/README.md docs/ARCHITECTURE.md tests/test_translation.py
+git commit -m "Fix documentation left stale by the atomics and VTCM rewrites
+
+README.md, docs/README.md, and docs/ARCHITECTURE.md all documented
+atomicAdd translating to ripple_atomic_add and __shared__ translating
+to a VTCM attribute — both now false after Tasks 2 and 4. Found during
+Task 2's code-quality review. Updated the translation-mapping tables
+and README's worked 'Parallel Reduction' example to match current
+behavior, and fixed two test comments in test_translation.py that
+cited since-removed fallback macros as their rationale."
+```
+
+- [ ] **Step 5: Run the full test suite**
 
 Run: `venv/bin/python -m pytest -v`
 Expected: All tests pass, 0 failures, 0 errors.
 
-- [ ] **Step 2: Verify a real, previously-broken kernel now hard-fails correctly**
+- [ ] **Step 6: Verify a real, previously-broken kernel now hard-fails correctly**
 
 ```bash
 venv/bin/python server.py > /tmp/cripple_verify_server.log 2>&1 &
@@ -1203,7 +1368,7 @@ reduction idiom — check the response for `ripple_reduceadd`; if present, this 
 correct pass, not a bug. Either a hard-fail or a `ripple_reduceadd` translation is
 correct here; a bare `ripple_atomic_add` in the output is not.)*
 
-- [ ] **Step 3: Verify a real kernel using VTCM now compiles**
+- [ ] **Step 7: Verify a real kernel using VTCM now compiles**
 
 ```bash
 curl -s http://127.0.0.1:5001/translate -X POST -H "Content-Type: application/json" \
@@ -1214,7 +1379,7 @@ curl -s http://127.0.0.1:5001/translate -X POST -H "Content-Type: application/js
 Expected: a JSON `translated` response containing `vtcm_malloc`, `vtcm_free`, and
 `#define HVX_PE 0`, and NOT containing `__attribute__((section(".vtcm")))`.
 
-- [ ] **Step 4: Verify the translated output actually syntax-checks**
+- [ ] **Step 8: Verify the translated output actually syntax-checks**
 
 Save the `translated` field from Step 3 to a file and run it through the same check
 `tests/compile_verify.py` uses:
@@ -1237,14 +1402,15 @@ instead of through `python3 -m json.tool`.)
 
 Expected: exit code `0`, no output (clean syntax check against the updated stub header).
 
-- [ ] **Step 5: Stop the server**
+- [ ] **Step 9: Stop the server**
 
 ```bash
 pkill -f "venv/bin/python server.py"
 ```
 
-- [ ] **Step 6: Final commit (only if Steps 1-4 needed any fixes)**
+- [ ] **Step 10: Final commit (only if Steps 5-8 needed any fixes)**
 
-If everything passed cleanly, no commit is needed here — Tasks 1-5 already committed
-everything. If verification surfaced a bug, fix it, re-run the full suite, and commit
-with a message describing what Task 6 caught.
+Step 4 already committed the documentation cleanup. If the verification steps (5-8)
+passed cleanly with no further fixes needed, no additional commit is needed here. If
+verification surfaced a bug, fix it, re-run the full suite, and commit with a message
+describing what this step caught.
