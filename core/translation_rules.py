@@ -173,20 +173,32 @@ class SharedMemoryRule(TranslationRule):
     (normally the kernel body itself, since __shared__ arrays are
     declared at kernel scope and live for the kernel's duration).
 
-    Multi-dimensional arrays (`__shared__ float tile[18][18]`) are a
-    hard-fail: a vtcm_malloc()-returned pointer can't be redeclared with
-    a trailing [dim] the way a real array can, and every tile[y][x]-style
-    indexing site elsewhere in the kernel would need rewriting to flat
-    pointer arithmetic — an AST-level transformation this regex-based
-    rule can't do safely.
+    Multi-dimensional arrays (`__shared__ float tile[16][32]`) are
+    flattened to a single vtcm_malloc() allocation, with every
+    `tile[y][x]`-style usage elsewhere in the kernel rewritten to flat
+    row-major indexing (`tile[(y) * (32) + (x)]`) — exactly what the
+    original 2D indexing already meant under the hood, so the rewrite is
+    semantics-preserving, not an approximation. A usage that doesn't
+    cleanly match the declared dimensionality (passed bare to a
+    function, used in sizeof(), indexed with the wrong number of
+    brackets, or containing nested-bracket index expressions) is a
+    hard-fail rather than a guess: e.g. sizeof(tile) after flattening
+    would silently return a pointer size instead of the original array
+    size if left unrewritten, so declining to guess there is the only
+    correct choice, not merely the cautious one.
+
+    1D arrays never needed this usage-rewriting in the first place:
+    var[i] on a pointer and var[i] on a real array compile to identical
+    code in C, so the syntax was already correct by accident once the
+    declaration became a pointer. That equivalence breaks down at 2+
+    dimensions, which is why this logic is scoped to len(dims) > 1.
     """
 
     # Array-form declarations only (requires trailing [...]) — scalar
     # `__shared__ float x;` is not matched or translated by this rule.
     # tests/test_translation.py reuses this pattern to detect leftover
     # untranslated declarations, so it inherits the same array-only scope.
-    PATTERN = r'__shared__\s+(\w+)\s+(\w+)\s*\[([^\]]*)\]'
-    EXTRA_DIM_PATTERN = re.compile(r'\s*\[[^\]]*\]')
+    PATTERN = r'__shared__\s+(\w+)\s+(\w+)\s*((?:\[[^\]]*\])+)'
     RETURN_PATTERN = re.compile(r'\breturn\b')
 
     def __init__(self):
@@ -234,34 +246,24 @@ class SharedMemoryRule(TranslationRule):
         result = cuda_code
 
         # Process right-to-left so earlier matches' offsets stay valid
-        # while later matches are rewritten (both the declaration itself
-        # and the vtcm_free() insertion grow the string).
+        # while later matches are rewritten (the declaration itself, the
+        # vtcm_free() insertion, and now N-D usage rewrites all grow the
+        # string).
         for match in reversed(matches):
             elem_type = match.group(1)
             var_name = match.group(2)
-            size_expr = match.group(3)
+            dims_group = match.group(3)
+            dims = re.findall(r'\[([^\]]*)\]', dims_group)
 
             ctx.shared_mem_mappings[var_name] = elem_type
 
             if ctx.target_platform != "hexagon":
                 # No VTCM claim to fix outside Hexagon — unchanged behavior.
-                decl = f"__attribute__((aligned(128))) {elem_type} {var_name}[{size_expr}]"
+                # dims_group already carries its own brackets (e.g.
+                # "[16][32]"), so it's spliced directly, not re-wrapped —
+                # re-wrapping would double-bracket into tile[[16][32]].
+                decl = f"__attribute__((aligned(128))) {elem_type} {var_name}{dims_group}"
                 result = result[:match.start()] + decl + result[match.end():]
-                continue
-
-            extra_dim = self.EXTRA_DIM_PATTERN.match(result, match.end())
-            if extra_dim:
-                ctx.add_error(
-                    f"SharedMemoryRule: multi-dimensional __shared__ array "
-                    f"'{var_name}' (declared as {elem_type} {var_name}"
-                    f"[{size_expr}]{extra_dim.group(0)}) is not supported. "
-                    f"Ripple's vtcm_malloc() returns a flat buffer, so "
-                    f"every indexing expression using '{var_name}' would "
-                    f"need rewriting to flat/manual indexing, which this "
-                    f"translator cannot do automatically. Flatten "
-                    f"'{var_name}' to a 1D array with manual index "
-                    f"arithmetic and retranslate."
-                )
                 continue
 
             free_pos = self._find_enclosing_brace_end(result, match.end())
@@ -269,7 +271,7 @@ class SharedMemoryRule(TranslationRule):
                 ctx.add_error(
                     f"SharedMemoryRule: could not find the closing brace of "
                     f"the block containing '__shared__ {elem_type} "
-                    f"{var_name}[{size_expr}]' — cannot place its matching "
+                    f"{var_name}{dims_group}' — cannot place its matching "
                     f"vtcm_free() call. Check for unbalanced braces in the "
                     f"kernel."
                 )
@@ -290,13 +292,81 @@ class SharedMemoryRule(TranslationRule):
                 )
                 continue
 
+            if len(dims) > 1:
+                usage_region = result[match.end():free_pos]
+                usage_pattern = re.compile(
+                    re.escape(var_name)
+                    + ''.join(r'\s*\[([^\[\]]*)\]' for _ in dims)
+                    + r'(?!\s*\[)'
+                )
+                name_pattern = re.compile(r'\b' + re.escape(var_name) + r'\b')
+
+                usages = []
+                bad_usage = None
+                for name_match in name_pattern.finditer(usage_region):
+                    usage_match = usage_pattern.match(usage_region, name_match.start())
+                    if usage_match is None:
+                        bad_usage = usage_region[
+                            name_match.start():name_match.start() + 40
+                        ]
+                        break
+                    usages.append(usage_match)
+
+                if bad_usage is not None:
+                    ctx.add_error(
+                        f"SharedMemoryRule: '{var_name}' (declared as "
+                        f"{elem_type} {var_name}{dims_group}, "
+                        f"{len(dims)} dimensions) is used in a way that "
+                        f"doesn't match its declared dimensionality — "
+                        f"near '{bad_usage}...'. This could be a bare "
+                        f"reference (passed to a function, used in "
+                        f"sizeof()), a different number of brackets than "
+                        f"declared, or an index expression containing "
+                        f"nested brackets. This translator can't confirm "
+                        f"the flattened rewrite would be correct there — "
+                        f"rewrite '{var_name}' to a 1D array with manual "
+                        f"index arithmetic and retranslate."
+                    )
+                    continue
+
+                # Right-to-left within the usage region too, for the same
+                # offset-safety reason as the outer declaration loop.
+                for usage_match in reversed(usages):
+                    indices = usage_match.groups()
+                    terms = []
+                    for i, idx_expr in enumerate(indices):
+                        stride_dims = dims[i + 1:]
+                        if stride_dims:
+                            stride = " * ".join(f"({d})" for d in stride_dims)
+                            if len(stride_dims) > 1:
+                                stride = f"({stride})"
+                            terms.append(f"({idx_expr}) * {stride}")
+                        else:
+                            terms.append(f"({idx_expr})")
+                    flat_index = " + ".join(terms)
+                    replacement = f"{var_name}[{flat_index}]"
+                    usage_region = (
+                        usage_region[:usage_match.start()]
+                        + replacement
+                        + usage_region[usage_match.end():]
+                    )
+
+                result = result[:match.end()] + usage_region + result[free_pos:]
+                # free_pos shifted by however much the usage rewrites
+                # changed the region's length.
+                free_pos = match.end() + len(usage_region)
+
             free_call = f"\n    vtcm_free({var_name});"
             result = result[:free_pos] + free_call + result[free_pos:]
 
+            if len(dims) > 1:
+                total_size_expr = " * ".join(f"({d})" for d in dims)
+            else:
+                total_size_expr = dims[0]
             malloc_decl = (
                 f"// CUDA __shared__ -> Ripple VTCM\n"
                 f"    {elem_type} *{var_name} = vtcm_malloc("
-                f"sizeof({elem_type}) * ({size_expr}), /*align_as=*/128)"
+                f"sizeof({elem_type}) * ({total_size_expr}), /*align_as=*/128)"
             )
             result = result[:match.start()] + malloc_decl + result[match.end():]
 

@@ -45,24 +45,18 @@ class TestMatrixOperations:
         assert "matmul_ripple" in result
     
     def test_tiled_matmul(self):
-        """Test tiled matrix multiplication with shared memory.
-
-        The two tiles are declared flat (1D) with manual row-major index
-        arithmetic, not as CUDA's native tile_A[TILE_SIZE][TILE_SIZE] — a
-        vtcm_malloc()-returned pointer can't be redeclared with a trailing
-        [dim] the way a real 2D array can (see
-        test_shared_memory_rule_multidim_hard_fails in test_translation.py),
-        so a 2D __shared__ tile is a hard-fail and must be flattened by
-        hand, exactly as the translator's own error message prescribes.
-        This also exercises two __shared__ declarations in one kernel,
-        i.e. the rule's right-to-left multi-match processing order.
-        """
+        """Test tiled matrix multiplication with shared memory, using
+        CUDA's natural 2D tile_A[TILE_SIZE][TILE_SIZE] syntax — this was
+        hand-flattened to 1D when SharedMemoryRule only supported one
+        dimension; now that it flattens 2D arrays automatically, this is
+        a real-kernel integration test of that path, including two
+        declarations in one kernel."""
         cuda_code = """
         #define TILE_SIZE 16
 
         __global__ void matmul_tiled(float *A, float *B, float *C, int N) {
-            __shared__ float tile_A[TILE_SIZE * TILE_SIZE];
-            __shared__ float tile_B[TILE_SIZE * TILE_SIZE];
+            __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
+            __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
 
             int tx = threadIdx.x;
             int ty = threadIdx.y;
@@ -73,19 +67,19 @@ class TestMatrixOperations:
 
             for (int t = 0; t < (N + TILE_SIZE - 1) / TILE_SIZE; t++) {
                 if (row < N && t * TILE_SIZE + tx < N)
-                    tile_A[ty * TILE_SIZE + tx] = A[row * N + t * TILE_SIZE + tx];
+                    tile_A[ty][tx] = A[row * N + t * TILE_SIZE + tx];
                 else
-                    tile_A[ty * TILE_SIZE + tx] = 0.0f;
+                    tile_A[ty][tx] = 0.0f;
 
                 if (col < N && t * TILE_SIZE + ty < N)
-                    tile_B[ty * TILE_SIZE + tx] = B[(t * TILE_SIZE + ty) * N + col];
+                    tile_B[ty][tx] = B[(t * TILE_SIZE + ty) * N + col];
                 else
-                    tile_B[ty * TILE_SIZE + tx] = 0.0f;
+                    tile_B[ty][tx] = 0.0f;
 
                 __syncthreads();
 
                 for (int k = 0; k < TILE_SIZE; k++) {
-                    sum += tile_A[ty * TILE_SIZE + k] * tile_B[k * TILE_SIZE + tx];
+                    sum += tile_A[ty][k] * tile_B[k][tx];
                 }
 
                 __syncthreads();
@@ -100,9 +94,14 @@ class TestMatrixOperations:
         result = translate_cuda_source(cuda_code)
 
         # Verify shared memory translation to real VTCM malloc/free
-        assert "vtcm_malloc(sizeof(float) * (TILE_SIZE * TILE_SIZE)" in result
+        assert "vtcm_malloc(sizeof(float) * ((TILE_SIZE) * (TILE_SIZE))" in result
         assert "vtcm_free(tile_A);" in result
         assert "vtcm_free(tile_B);" in result
+        # 2D usages rewritten to flat row-major indexing
+        assert "tile_A[(ty) * (TILE_SIZE) + (tx)]" in result
+        assert "tile_B[(ty) * (TILE_SIZE) + (tx)]" in result
+        assert "tile_A[(ty) * (TILE_SIZE) + (k)]" in result
+        assert "tile_B[(k) * (TILE_SIZE) + (tx)]" in result
         assert "ripple_id(ripple_block" in result
         # __syncthreads should be converted to comment (implicit in SIMD)
         assert "/* __syncthreads" in result or "__syncthreads" not in result
@@ -287,8 +286,8 @@ class TestConvolutionKernels:
     
     def test_2d_convolution(self):
         """Test 2D convolution kernel (direct global-memory access — see
-        test_shared_memory_rule_multidim_hard_fails in test_translation.py
-        for the separate, dedicated 2D-shared-memory coverage)."""
+        test_shared_memory_rule_2d_flattens in test_translation.py for the
+        separate, dedicated 2D-shared-memory coverage)."""
         cuda_code = """
         #define KERNEL_SIZE 3
 

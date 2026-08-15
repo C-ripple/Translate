@@ -134,20 +134,101 @@ class TestTranslationRules:
         # the free() call must land before the function's closing brace
         assert result.index("vtcm_free") < result.rindex("}")
 
-    def test_shared_memory_rule_multidim_hard_fails(self):
-        """Multi-dimensional __shared__ arrays have no safe vtcm_malloc
-        translation — a flat pointer can't be redeclared with a trailing
-        [dim], and every indexing site would need flat-arithmetic
-        rewriting this translator can't do. Must hard-fail, not emit
-        invalid C."""
+    def test_shared_memory_rule_2d_flattens(self):
+        """A 2D __shared__ array flattens to a single vtcm_malloc, and a
+        real usage elsewhere in the kernel is rewritten to flat row-major
+        indexing — exactly what the original 2D indexing already meant
+        under the hood."""
         rule = SharedMemoryRule()
         ctx = TranslationContext(target_platform="hexagon")
 
-        source = "void k() {\n    __shared__ float tile[18][18];\n}"
+        source = "void k() {\n    __shared__ float tile[16][32];\n    tile[3][5] = 1.0f;\n}"
+        result = rule.apply(source, ctx)
+
+        assert not ctx.has_errors(), ctx.errors
+        assert "float *tile = vtcm_malloc(sizeof(float) * ((16) * (32)), /*align_as=*/128);" in result
+        assert "tile[(3) * (32) + (5)] = 1.0f;" in result
+        assert "vtcm_free(tile);" in result
+        assert result.index("vtcm_malloc") < result.index("tile[(3)")
+        assert result.index("tile[(3)") < result.index("vtcm_free")
+
+    def test_shared_memory_rule_3d_flattens(self):
+        """Flattening generalizes past 2D — this is genuinely N-dimensional,
+        not a 2D special case."""
+        rule = SharedMemoryRule()
+        ctx = TranslationContext(target_platform="hexagon")
+
+        source = "void k() {\n    __shared__ float vol[4][5][6];\n    vol[1][2][3] = 1.0f;\n}"
+        result = rule.apply(source, ctx)
+
+        assert not ctx.has_errors(), ctx.errors
+        assert "vtcm_malloc(sizeof(float) * ((4) * (5) * (6))" in result
+        assert "vol[(1) * ((5) * (6)) + (2) * (6) + (3)] = 1.0f;" in result
+        assert "vtcm_free(vol);" in result
+
+    def test_shared_memory_rule_nd_hard_fails_on_sizeof_usage(self):
+        """A usage that doesn't match the declared dimensionality — here,
+        sizeof(tile) — must hard-fail rather than guess. Left unrewritten,
+        sizeof(tile) after flattening would silently return a pointer
+        size instead of the original array size."""
+        rule = SharedMemoryRule()
+        ctx = TranslationContext(target_platform="hexagon")
+
+        source = "void k() {\n    __shared__ float tile[16][32];\n    int s = sizeof(tile);\n}"
         result = rule.apply(source, ctx)
 
         assert ctx.has_errors()
         assert "tile" in ctx.errors[0]
+
+    def test_shared_memory_rule_nd_hard_fails_on_bracket_count_mismatch(self):
+        """A usage indexed with fewer brackets than declared (passing a
+        row by reference, effectively) must hard-fail — this translator
+        can't confirm the caller's expectations about that reference."""
+        rule = SharedMemoryRule()
+        ctx = TranslationContext(target_platform="hexagon")
+
+        source = "void k() {\n    __shared__ float tile[16][32];\n    float *row = tile[3];\n}"
+        result = rule.apply(source, ctx)
+
+        assert ctx.has_errors()
+        assert "tile" in ctx.errors[0]
+
+    def test_shared_memory_rule_nd_multiple_declarations(self):
+        """Two 2D __shared__ arrays in one kernel — exercises the
+        right-to-left multi-match processing order with N-D flattening,
+        not just the 1D case it was originally built for."""
+        rule = SharedMemoryRule()
+        ctx = TranslationContext(target_platform="hexagon")
+
+        source = (
+            "void k() {\n"
+            "    __shared__ float tile_a[4][4];\n"
+            "    __shared__ float tile_b[4][4];\n"
+            "    tile_a[1][2] = tile_b[2][1];\n"
+            "}"
+        )
+        result = rule.apply(source, ctx)
+
+        assert not ctx.has_errors(), ctx.errors
+        assert "vtcm_malloc(sizeof(float) * ((4) * (4))" in result
+        assert "tile_a[(1) * (4) + (2)] = tile_b[(2) * (4) + (1)];" in result
+        assert "vtcm_free(tile_a);" in result
+        assert "vtcm_free(tile_b);" in result
+
+    def test_shared_memory_rule_nonhexagon_2d_unchanged(self):
+        """Non-Hexagon targets keep the pre-VTCM attribute-based behavior
+        for multi-dimensional arrays too — must not double-bracket into
+        invalid syntax like tile[[16][32]] now that the capture group
+        includes the brackets themselves."""
+        rule = SharedMemoryRule()
+        ctx = TranslationContext(target_platform="x86")
+
+        source = "void k() {\n    __shared__ float tile[16][32];\n}"
+        result = rule.apply(source, ctx)
+
+        assert not ctx.has_errors(), ctx.errors
+        assert "__attribute__((aligned(128))) float tile[16][32]" in result
+        assert "[[" not in result
 
     def test_shared_memory_rule_early_return_hard_fails(self):
         """A 'return' between the __shared__ declaration and the enclosing
@@ -1711,6 +1792,21 @@ __global__ void k(float *a, float *b) {
 }
 """
         result = translate_cuda_source(source)
+        success, output = verify_ripple_syntax(result)
+        assert success, output
+
+    @requires_clang
+    def test_2d_shared_memory_output_passes_syntax_check(self):
+        cuda_code = """
+__global__ void k(float *out) {
+    __shared__ float tile[4][4];
+    int y = threadIdx.y;
+    int x = threadIdx.x;
+    tile[y][x] = 1.0f;
+    out[y * 4 + x] = tile[y][x];
+}
+"""
+        result = translate_cuda_source(cuda_code)
         success, output = verify_ripple_syntax(result)
         assert success, output
 
