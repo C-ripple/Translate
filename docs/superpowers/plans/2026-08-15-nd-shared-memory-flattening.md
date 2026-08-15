@@ -394,7 +394,9 @@ class SharedMemoryRule(TranslationRule):
                         stride_dims = dims[i + 1:]
                         if stride_dims:
                             stride = " * ".join(f"({d})" for d in stride_dims)
-                            terms.append(f"({idx_expr}) * ({stride})")
+                            if len(stride_dims) > 1:
+                                stride = f"({stride})"
+                            terms.append(f"({idx_expr}) * {stride}")
                         else:
                             terms.append(f"({idx_expr})")
                     flat_index = " + ".join(terms)
@@ -413,7 +415,10 @@ class SharedMemoryRule(TranslationRule):
             free_call = f"\n    vtcm_free({var_name});"
             result = result[:free_pos] + free_call + result[free_pos:]
 
-            total_size_expr = " * ".join(f"({d})" for d in dims)
+            if len(dims) > 1:
+                total_size_expr = " * ".join(f"({d})" for d in dims)
+            else:
+                total_size_expr = dims[0]
             malloc_decl = (
                 f"// CUDA __shared__ -> Ripple VTCM\n"
                 f"    {elem_type} *{var_name} = vtcm_malloc("
@@ -428,13 +433,15 @@ class SharedMemoryRule(TranslationRule):
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_2d_flattens tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_3d_flattens tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_nd_hard_fails_on_sizeof_usage tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_nd_hard_fails_on_bracket_count_mismatch tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_nd_multiple_declarations tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_nonhexagon_2d_unchanged tests/test_complex_kernels.py::TestMatrixOperations::test_tiled_matmul -v`
 
-Expected: PASS. If `test_shared_memory_rule_3d_flattens` fails on the exact expected
-string, double-check the nested-parens shape described in Step 3's code
-(`stride = " * ".join(...)` then `f"({idx_expr}) * ({stride})"` — for a 2-element stride
-this produces `(1) * ((5) * (6))`, with one extra layer of parens around the stride
-product; this is correct arithmetic, just not maximally minimal — the test's expected
-string already reflects this exact shape, don't "simplify" the implementation to match a
-different string without re-deriving the expected value by hand first).
+Expected: PASS. The nested-parens shape in Step 3's code only wraps a stride/size
+product in an extra outer paren when it has *more than one* term — a single-term
+stride/size stays unwrapped (`stride = "(6)"`, not `"((6))"`; `total_size_expr = "256"`
+for 1D, substituted into the single pair of parens the malloc f-string already provides).
+This is what keeps the existing 1D tests (`test_shared_memory_rule`,
+`test_shared_memory_vtcm_free_placement`) passing unchanged — a uniform "always add one
+more wrap" formula would double-parenthesize those and break them. If a test fails on
+the exact expected string, re-derive it by hand from this two-case rule rather than
+"simplifying" the implementation to match a different string.
 
 - [ ] **Step 5: Run the full test suite to check for regressions**
 
