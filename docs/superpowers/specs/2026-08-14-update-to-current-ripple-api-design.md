@@ -111,18 +111,36 @@ currently supports only one SIMD PE type). Change `_add_ripple_boilerplate()` to
 ### 5. Document the required compile flag
 
 `-fenable-ripple` is required (`temp_ripple_docs`'s troubleshooting guide, "Missing
-ripple_* symbols" section) and is currently undocumented in README.md, the CLI, the web
-UI, and the generated file's header comment. Add it to all four.
+ripple_* symbols" section) and is currently undocumented everywhere. Add it in exactly
+four places: `README.md`, the CLI's `source`/`ir` subparser help text
+(`interfaces/cli/cuda2ripple.py`), the generated output file's header comment (natural
+to add alongside the item-4 boilerplate change, since it's already being touched), and
+the Flask web UI's `HTML_TEMPLATE` status bar (`interfaces/web/server.py`) — not the
+Flutter app, which has no help/instructions surface today and is out of scope to add
+one to. Note there are two Flask servers in this repo (root `server.py`, minimal API
+only; `interfaces/web/server.py`, has the HTML UI) — this item touches only the one with
+user-facing copy.
 
 ### 6. Tests
 
-- New fixtures for each of the 5 atomics hard-fail paths.
-- New fixtures for the VTCM rewrite, including a multi-statement kernel body to exercise
-  the brace-matching `vtcm_free()` insertion.
-- Update/rename fixtures referencing `ripple_sad` → `cripple_sad`.
-- Update `tests/stub_headers/ripple.h`: add `vtcm_malloc`/`vtcm_free`/`HVX_PE` declarations,
-  remove nothing atomics-related (it never declared the fake atomic API, since those were
-  boilerplate-local macros, not calls the stub needed to resolve).
+Existing tests that currently assert *successful* translation of what's becoming a
+hard-fail need to be rewritten to assert `TranslationError`/`ctx.add_error`, not just
+supplemented with new ones:
+- `tests/test_complex_kernels.py`: `test_atomic_cas`, `test_atomic_exch`,
+  `test_atomic_min_max`, and `test_sad_computation` (this one is mixed — it asserts both
+  `ripple_sad` and `ripple_atomic_add` in one kernel; the `atomicAdd` there is a bare
+  per-thread call, not the recognized block-reduction idiom, so it becomes a hard-fail
+  case while the `__sad` part becomes a `cripple_sad` rename — split into two tests).
+- `tests/test_translation.py`: `test_atomic_add_rule`.
+
+Additional new coverage:
+- One hard-fail fixture each for `AtomicMaxRule`/`AtomicCASRule`/`AtomicExchRule` beyond
+  what's already covered above (min is covered by `test_atomic_min_max`'s split).
+- VTCM rewrite fixtures, including a multi-statement kernel body to exercise the
+  brace-matching `vtcm_free()` insertion.
+- Update `tests/stub_headers/ripple.h`: add `vtcm_malloc`/`vtcm_free`/`HVX_PE`
+  declarations. Nothing to remove there for atomics — it never declared the fake atomic
+  API, since those were boilerplate-local macros, not calls the stub needed to resolve.
 - Existing shuffle/reduction/thread-indexing tests are untouched — already correct.
 
 ## Out of scope
