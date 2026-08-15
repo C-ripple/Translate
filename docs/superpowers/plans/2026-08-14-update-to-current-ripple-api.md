@@ -1012,6 +1012,172 @@ gh issue create --repo C-ripple/Translate \
 
 ---
 
+## Task 4b: Hard-fail VTCM allocations that leak on an early return
+
+**Files:**
+- Modify: `core/translation_rules.py` (`SharedMemoryRule`)
+- Modify: `tests/test_translation.py` (new test)
+
+Task 4's code-quality review found a real, currently-latent gap:
+`SharedMemoryRule` places `vtcm_free()` only immediately before the *enclosing block's*
+closing brace. A guard-clause early `return` between the `__shared__` declaration and
+that brace — an extremely common CUDA idiom (`if (idx >= n) return;`) — skips the
+`vtcm_free()` call entirely on that path. VTCM is a small, real hardware scratchpad, not
+virtual memory the OS reclaims on function exit, so this is a genuine resource leak, not
+a style nit. Confirmed during review: no currently-passing fixture triggers it (nothing
+in the test suite has a `return` between a surviving `__shared__` declaration and its
+enclosing brace), so this is a latent gap in kernels the test suite doesn't yet cover,
+not a regression — but it's real, and it fails silently, which is exactly the failure
+mode this same rule already avoids for the multi-dimensional case one branch away. Fix it
+the same way: hard-fail with a clear diagnostic, matching this rule's own established
+convention, rather than leave it to bite a real kernel later.
+
+Also fold in the review's second finding: `_find_enclosing_brace_end`'s
+literal/comment-blind-spot caveat (a `}` inside a string or comment in the scanned range
+would misplace `vtcm_free()`) currently lives only in the Task 4 commit message, not in
+the code. Move it into the method's own docstring, where a future reader will actually
+see it. Do NOT attempt to make the scanner comment/string-aware in this task — that's a
+bigger, separately-scoped change (this rule's scan region is often the whole kernel body,
+where real kernels routinely contain comments and string-free but brace-containing
+constructs; a blanket bail-out on any comment in range would hard-fail legitimate,
+currently-passing kernels, which is a worse regression than the documented limitation).
+
+- [ ] **Step 1: Write the failing test**
+
+Add to the `TestTranslationRules` class in `tests/test_translation.py` (near the other
+`test_shared_memory_rule*` tests):
+
+```python
+    def test_shared_memory_rule_early_return_hard_fails(self):
+        """A 'return' between the __shared__ declaration and the enclosing
+        block's end would leak the VTCM allocation on that path — VTCM is
+        a small, real hardware scratchpad, not virtual memory. Must
+        hard-fail rather than silently leak."""
+        rule = SharedMemoryRule()
+        ctx = TranslationContext(target_platform="hexagon")
+
+        source = (
+            "void k(int n) {\n"
+            "    __shared__ float sdata[256];\n"
+            "    if (n < 0) return;\n"
+            "    sdata[0] = 1.0f;\n"
+            "}"
+        )
+        result = rule.apply(source, ctx)
+
+        assert ctx.has_errors()
+        assert "sdata" in ctx.errors[0]
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `venv/bin/python -m pytest tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_early_return_hard_fails -v`
+Expected: FAIL — no error is recorded today; the rule currently emits `vtcm_free(sdata);`
+right before the final `}`, leaking on the `return` path instead of hard-failing.
+
+- [ ] **Step 3: Add the return-path check**
+
+In `core/translation_rules.py`, in `SharedMemoryRule`, add a class-level pattern next to
+`EXTRA_DIM_PATTERN`:
+
+```python
+    EXTRA_DIM_PATTERN = re.compile(r'\s*\[[^\]]*\]')
+    RETURN_PATTERN = re.compile(r'\breturn\b')
+```
+
+In `apply()`, right after the existing `free_pos == -1` check (and its `continue`) and
+before building `free_call`/`malloc_decl`, add:
+
+```python
+            if self.RETURN_PATTERN.search(result, match.end(), free_pos):
+                ctx.add_error(
+                    f"SharedMemoryRule: '{var_name}' is followed by a "
+                    f"'return' before the end of its enclosing block. "
+                    f"Placing vtcm_free('{var_name}') only at the block's "
+                    f"closing brace would leak the VTCM allocation on "
+                    f"that early-return path — VTCM is a small, real "
+                    f"hardware scratchpad, not virtual memory. "
+                    f"Restructure the kernel so '{var_name}' is freed on "
+                    f"every exit path (e.g. move any early-exit checks "
+                    f"before the __shared__ declaration, not after it), "
+                    f"and retranslate."
+                )
+                continue
+```
+
+Then update `_find_enclosing_brace_end`'s docstring to note the literal/comment caveat.
+Find:
+
+```python
+    @staticmethod
+    def _find_enclosing_brace_end(text: str, start: int) -> int:
+        """Find the index of the '}' that closes the block containing `start`."""
+```
+
+Replace with:
+
+```python
+    @staticmethod
+    def _find_enclosing_brace_end(text: str, start: int) -> int:
+        """Find the index of the '}' that closes the block containing `start`.
+
+        Counts every '{'/'}' character with no awareness of string/char
+        literals or comments — a brace inside either would misplace the
+        result. No kernel in this codebase's test suite currently
+        triggers this (verified: none have a comment or string literal
+        containing a brace between a surviving __shared__ declaration and
+        its enclosing '}'), but it's a real limitation, not a
+        theoretical one — the same bug class UnrollConstantShuffleLoopRule
+        needed several hardening rounds to close for its own, narrower
+        scan region. A blanket bail-out on any comment/string in range
+        isn't the right fix here: unlike that rule's small loop-body
+        scan, this method's scan region is often an entire kernel body,
+        where real kernels routinely contain comments — bailing out on
+        their mere presence would hard-fail legitimate kernels. Making
+        this scanner literal/comment-aware is a real fix but a separately
+        scoped one.
+        """
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `venv/bin/python -m pytest tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_early_return_hard_fails -v`
+Expected: PASS
+
+- [ ] **Step 5: Run the full test suite to check for regressions**
+
+Run: `venv/bin/python -m pytest -v`
+Expected: All tests pass, 0 failures. (145 before this task; +1 new test.) If any
+existing test now fails, check whether it has a `return` anywhere between a `__shared__`
+declaration and the end of its enclosing block — that would mean this task's new check
+is (correctly) catching a real pre-existing case a fixture happens to contain; if so,
+that fixture needs the same kind of fix `test_tiled_matmul` got in Task 4 (restructure to
+avoid the leak pattern, or accept the hard-fail as correct and adjust the test's
+expectation) rather than weakening the new check.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add core/translation_rules.py tests/test_translation.py
+git commit -m "Hard-fail VTCM allocations that would leak on an early return
+
+Task 4's code-quality review found SharedMemoryRule's vtcm_free()
+placement only covers the enclosing block's closing brace — a guard-
+clause early return between the __shared__ declaration and that brace
+(a common CUDA idiom) skips the free entirely, leaking VTCM, a small
+real hardware scratchpad, not virtual memory. No current fixture hits
+this, but it's a real gap, and it fails silently. Hard-failing it
+matches this rule's own existing convention for the adjacent
+multi-dimensional-array case.
+
+Also moves the brace-counter's literal/comment-blind-spot caveat from
+the Task 4 commit message into _find_enclosing_brace_end's own
+docstring, where a future reader will actually see it, per the same
+review."
+```
+
+---
+
 ## Task 5: Document the required `-fenable-ripple` compile flag
 
 **Files:**
