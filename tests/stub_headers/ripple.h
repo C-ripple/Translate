@@ -43,4 +43,11 @@ size_t ripple_shuffle(size_t value, ripple_shuffle_fn_t fn);
  * stub's upstream-accurate arity) is fixed as of this checkout. */
 size_t ripple_reduceadd(int dims, size_t to_reduce);
 
+/* opt/hexagon/src/hvx-opt.md's SpVV example uses vtcm_malloc()/vtcm_free()
+ * but never gives them a formal declared signature — only usage. This
+ * signature is inferred directly from that usage (size + alignment for
+ * malloc; a single pointer for free), not from an upstream prototype. */
+void *vtcm_malloc(size_t size, size_t align_as);
+void vtcm_free(void *ptr);
+
 #endif

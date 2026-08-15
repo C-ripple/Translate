@@ -8,7 +8,7 @@ source-level and IR-level frontends.
 Key Mappings:
     CUDA threadIdx.{x,y,z}  ->  ripple_id(block, {0,1,2})
     CUDA blockDim.{x,y,z}   ->  ripple_get_block_size(block, {0,1,2})
-    CUDA __shared__         ->  local array + VTCM hints (Hexagon)
+    CUDA __shared__         ->  vtcm_malloc()/vtcm_free() (Hexagon)
     CUDA __syncthreads()    ->  implicit (SIMD model) or explicit barrier
     CUDA atomicAdd          ->  ripple_reduction or HVX scatter-accumulate
     CUDA warp shuffles      ->  ripple_shuffle with permutation function
@@ -161,42 +161,111 @@ class GridDimRule(TranslationRule):
 # =============================================================================
 
 class SharedMemoryRule(TranslationRule):
-    """Translates __shared__ declarations to local arrays with VTCM hints."""
+    """Translates __shared__ array declarations to VTCM malloc/free pairs.
+
+    Ripple's VTCM (Vector Tightly Coupled Memory) is accessed through
+    vtcm_malloc()/vtcm_free() runtime calls (see the SpVV example in
+    Ripple's HVX optimization guide) — there is no attribute-based way to
+    place a variable in VTCM. The free() call is inserted immediately
+    before the closing brace of the block enclosing the declaration
+    (normally the kernel body itself, since __shared__ arrays are
+    declared at kernel scope and live for the kernel's duration).
+
+    Multi-dimensional arrays (`__shared__ float tile[18][18]`) are a
+    hard-fail: a vtcm_malloc()-returned pointer can't be redeclared with
+    a trailing [dim] the way a real array can, and every tile[y][x]-style
+    indexing site elsewhere in the kernel would need rewriting to flat
+    pointer arithmetic — an AST-level transformation this regex-based
+    rule can't do safely.
+    """
 
     # Array-form declarations only (requires trailing [...]) — scalar
     # `__shared__ float x;` is not matched or translated by this rule.
     # tests/test_translation.py reuses this pattern to detect leftover
     # untranslated declarations, so it inherits the same array-only scope.
     PATTERN = r'__shared__\s+(\w+)\s+(\w+)\s*\[([^\]]*)\]'
-    
+    EXTRA_DIM_PATTERN = re.compile(r'\s*\[[^\]]*\]')
+
     def __init__(self):
         super().__init__(
             name="shared_memory",
-            description="Translate __shared__ to local array with VTCM",
+            description="Translate __shared__ array to vtcm_malloc/vtcm_free",
             cuda_pattern=self.PATTERN,
             priority=90
         )
-    
+
+    @staticmethod
+    def _find_enclosing_brace_end(text: str, start: int) -> int:
+        """Find the index of the '}' that closes the block containing `start`."""
+        depth = 0
+        i = start
+        while i < len(text):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                if depth == 0:
+                    return i
+                depth -= 1
+            i += 1
+        return -1
+
     def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
-        def replace(match):
+        matches = list(re.finditer(self.PATTERN, cuda_code))
+        result = cuda_code
+
+        # Process right-to-left so earlier matches' offsets stay valid
+        # while later matches are rewritten (both the declaration itself
+        # and the vtcm_free() insertion grow the string).
+        for match in reversed(matches):
             elem_type = match.group(1)
             var_name = match.group(2)
             size_expr = match.group(3)
-            
-            ctx.shared_mem_mappings[var_name] = f"__attribute__((aligned(128))) {elem_type}"
-            
-            if ctx.target_platform == "hexagon":
-                # Use VTCM for shared memory on Hexagon
-                return (
-                    f"// CUDA __shared__ -> Hexagon VTCM\n"
-                    f"    __attribute__((section(\".vtcm\"))) "
-                    f"__attribute__((aligned(128))) "
-                    f"{elem_type} {var_name}[{size_expr}]"
+
+            ctx.shared_mem_mappings[var_name] = elem_type
+
+            if ctx.target_platform != "hexagon":
+                # No VTCM claim to fix outside Hexagon — unchanged behavior.
+                decl = f"__attribute__((aligned(128))) {elem_type} {var_name}[{size_expr}]"
+                result = result[:match.start()] + decl + result[match.end():]
+                continue
+
+            extra_dim = self.EXTRA_DIM_PATTERN.match(result, match.end())
+            if extra_dim:
+                ctx.add_error(
+                    f"SharedMemoryRule: multi-dimensional __shared__ array "
+                    f"'{var_name}' (declared as {elem_type} {var_name}"
+                    f"[{size_expr}]{extra_dim.group(0)}) is not supported. "
+                    f"Ripple's vtcm_malloc() returns a flat buffer, so "
+                    f"every indexing expression using '{var_name}' would "
+                    f"need rewriting to flat/manual indexing, which this "
+                    f"translator cannot do automatically. Flatten "
+                    f"'{var_name}' to a 1D array with manual index "
+                    f"arithmetic and retranslate."
                 )
-            else:
-                return f"__attribute__((aligned(128))) {elem_type} {var_name}[{size_expr}]"
-        
-        return re.sub(self.PATTERN, replace, cuda_code)
+                continue
+
+            free_pos = self._find_enclosing_brace_end(result, match.end())
+            if free_pos == -1:
+                ctx.add_error(
+                    f"SharedMemoryRule: could not find the closing brace of "
+                    f"the block containing '__shared__ {elem_type} "
+                    f"{var_name}[{size_expr}]' — cannot place its matching "
+                    f"vtcm_free() call. Check for unbalanced braces in the "
+                    f"kernel."
+                )
+                continue
+
+            free_call = f"\n    vtcm_free({var_name});"
+            result = result[:free_pos] + free_call + result[free_pos:]
+
+            malloc_decl = (
+                f"// CUDA __shared__ -> Ripple VTCM\n"
+                f"    {elem_type} *{var_name} = vtcm_malloc("
+                f"sizeof({elem_type}) * ({size_expr}), /*align_as=*/128)"
+            )
+            result = result[:match.start()] + malloc_decl + result[match.end():]
+
+        return result
 
 
 class DynamicSharedMemoryRule(TranslationRule):

@@ -39,13 +39,13 @@ NOT in SYNTAX_CHECK_PARAMS yet:
 getting it through a real clang syntax check requires fixing several
 separate, unrelated gaps this file is the first fixture to exercise —
 confirmed directly against the actual clang output, not assumed:
-  - __attribute__((section(".vtcm"))) is emitted on LOCAL (non-file-
-    scope) array declarations for every __shared__ array in this file
-    — the single most frequent error class; valid Hexagon codegen,
-    invalid to a host clang syntax check.
   - scalar (non-array) __shared__ declarations aren't translated at
     all (only array-form ones are) and pass through as literal,
     invalid C.
+  - this file's one 2D __shared__ tile (tile[TILE_DIM][TILE_DIM + 1])
+    is now a deliberate hard-fail (SharedMemoryRule, see
+    core/translation_rules.py) rather than emitting invalid C — still
+    a blocker for a clean syntax check, just no longer a silent one.
   - a bare warpSize token used outside a recognized loop pattern
     passes through untranslated.
   - a few CUDA math intrinsics (expf, INFINITY, __float_as_int) have
@@ -55,6 +55,10 @@ confirmed directly against the actual clang output, not assumed:
     that's a byproduct of THIS task rather than pre-existing, since no
     other SYNTAX_CHECK_PARAMS fixture uses fmaxf/fminf reduction; it's
     latent and breaks nothing while this file stays structural-only.
+(The former __attribute__((section(".vtcm"))) gap — that attribute
+being emitted on local, non-file-scope array declarations, invalid to
+a host clang syntax check — is now fixed: SharedMemoryRule emits real
+vtcm_malloc()/vtcm_free() calls instead of that attribute.)
 None of the above is shuffle-translation-logic-related; closing it is
 separate, larger, unscoped work. Revisit this list (it may not be
 complete) before ever adding this file to SYNTAX_CHECK_PARAMS.

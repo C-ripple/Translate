@@ -118,15 +118,37 @@ class TestTranslationRules:
         assert "ripple_get_block_size(ripple_block, 1)" in result
     
     def test_shared_memory_rule(self):
+        """__shared__ arrays translate to vtcm_malloc, with a matching
+        vtcm_free() inserted before the enclosing block's closing brace —
+        the real Ripple VTCM mechanism, not an attribute (which doesn't
+        exist in the Ripple API)."""
         rule = SharedMemoryRule()
         ctx = TranslationContext(target_platform="hexagon")
-        
-        source = "__shared__ float sdata[256]"
+
+        source = "void k() {\n    __shared__ float sdata[256];\n    sdata[0] = 1.0f;\n}"
         result = rule.apply(source, ctx)
-        
-        assert "__attribute__((aligned(128)))" in result
-        assert "sdata[256]" in result
-    
+
+        assert "float *sdata = vtcm_malloc(sizeof(float) * (256), /*align_as=*/128);" in result
+        assert "vtcm_free(sdata);" in result
+        assert result.index("vtcm_malloc") < result.index("vtcm_free")
+        # the free() call must land before the function's closing brace
+        assert result.index("vtcm_free") < result.rindex("}")
+
+    def test_shared_memory_rule_multidim_hard_fails(self):
+        """Multi-dimensional __shared__ arrays have no safe vtcm_malloc
+        translation — a flat pointer can't be redeclared with a trailing
+        [dim], and every indexing site would need flat-arithmetic
+        rewriting this translator can't do. Must hard-fail, not emit
+        invalid C."""
+        rule = SharedMemoryRule()
+        ctx = TranslationContext(target_platform="hexagon")
+
+        source = "void k() {\n    __shared__ float tile[18][18];\n}"
+        result = rule.apply(source, ctx)
+
+        assert ctx.has_errors()
+        assert "tile" in ctx.errors[0]
+
     def test_atomic_add_rule(self):
         """atomicAdd has no Ripple equivalent outside a recognized
         reduction idiom (handled separately by WarpReductionRule etc.) —

@@ -45,51 +45,64 @@ class TestMatrixOperations:
         assert "matmul_ripple" in result
     
     def test_tiled_matmul(self):
-        """Test tiled matrix multiplication with shared memory."""
+        """Test tiled matrix multiplication with shared memory.
+
+        The two tiles are declared flat (1D) with manual row-major index
+        arithmetic, not as CUDA's native tile_A[TILE_SIZE][TILE_SIZE] — a
+        vtcm_malloc()-returned pointer can't be redeclared with a trailing
+        [dim] the way a real 2D array can (see
+        test_shared_memory_rule_multidim_hard_fails in test_translation.py),
+        so a 2D __shared__ tile is a hard-fail and must be flattened by
+        hand, exactly as the translator's own error message prescribes.
+        This also exercises two __shared__ declarations in one kernel,
+        i.e. the rule's right-to-left multi-match processing order.
+        """
         cuda_code = """
         #define TILE_SIZE 16
-        
+
         __global__ void matmul_tiled(float *A, float *B, float *C, int N) {
-            __shared__ float tile_A[TILE_SIZE][TILE_SIZE];
-            __shared__ float tile_B[TILE_SIZE][TILE_SIZE];
-            
+            __shared__ float tile_A[TILE_SIZE * TILE_SIZE];
+            __shared__ float tile_B[TILE_SIZE * TILE_SIZE];
+
             int tx = threadIdx.x;
             int ty = threadIdx.y;
             int row = blockIdx.y * TILE_SIZE + ty;
             int col = blockIdx.x * TILE_SIZE + tx;
-            
+
             float sum = 0.0f;
-            
+
             for (int t = 0; t < (N + TILE_SIZE - 1) / TILE_SIZE; t++) {
                 if (row < N && t * TILE_SIZE + tx < N)
-                    tile_A[ty][tx] = A[row * N + t * TILE_SIZE + tx];
+                    tile_A[ty * TILE_SIZE + tx] = A[row * N + t * TILE_SIZE + tx];
                 else
-                    tile_A[ty][tx] = 0.0f;
-                
+                    tile_A[ty * TILE_SIZE + tx] = 0.0f;
+
                 if (col < N && t * TILE_SIZE + ty < N)
-                    tile_B[ty][tx] = B[(t * TILE_SIZE + ty) * N + col];
+                    tile_B[ty * TILE_SIZE + tx] = B[(t * TILE_SIZE + ty) * N + col];
                 else
-                    tile_B[ty][tx] = 0.0f;
-                
+                    tile_B[ty * TILE_SIZE + tx] = 0.0f;
+
                 __syncthreads();
-                
+
                 for (int k = 0; k < TILE_SIZE; k++) {
-                    sum += tile_A[ty][k] * tile_B[k][tx];
+                    sum += tile_A[ty * TILE_SIZE + k] * tile_B[k * TILE_SIZE + tx];
                 }
-                
+
                 __syncthreads();
             }
-            
+
             if (row < N && col < N) {
                 C[row * N + col] = sum;
             }
         }
         """
-        
+
         result = translate_cuda_source(cuda_code)
-        
-        # Verify shared memory translation to VTCM
-        assert "__attribute__((section" in result or "tile_A" in result
+
+        # Verify shared memory translation to real VTCM malloc/free
+        assert "vtcm_malloc(sizeof(float) * (TILE_SIZE * TILE_SIZE)" in result
+        assert "vtcm_free(tile_A);" in result
+        assert "vtcm_free(tile_B);" in result
         assert "ripple_id(ripple_block" in result
         # __syncthreads should be converted to comment (implicit in SIMD)
         assert "/* __syncthreads" in result or "__syncthreads" not in result
@@ -273,41 +286,60 @@ class TestConvolutionKernels:
         assert "block_idx_x" in result
     
     def test_2d_convolution(self):
-        """Test 2D convolution with shared memory."""
+        """Test 2D convolution kernel (direct global-memory access — see
+        test_shared_memory_rule_multidim_hard_fails in test_translation.py
+        for the separate, dedicated 2D-shared-memory coverage)."""
         cuda_code = """
         #define KERNEL_SIZE 3
-        
+
         __global__ void conv2d(float *input, float *kernel, float *output,
                                int width, int height) {
-            __shared__ float tile[18][18];
-            
             int tx = threadIdx.x;
             int ty = threadIdx.y;
             int x = blockIdx.x * blockDim.x + tx;
             int y = blockIdx.y * blockDim.y + ty;
-            
-            // Load tile with halo
-            if (x < width && y < height) {
-                tile[ty][tx] = input[y * width + x];
-            }
-            __syncthreads();
-            
+
             if (x < width && y < height) {
                 float sum = 0.0f;
                 for (int ky = 0; ky < KERNEL_SIZE; ky++) {
                     for (int kx = 0; kx < KERNEL_SIZE; kx++) {
-                        sum += tile[ty + ky][tx + kx] * 
-                               kernel[ky * KERNEL_SIZE + kx];
+                        int sx = x + kx - KERNEL_SIZE / 2;
+                        int sy = y + ky - KERNEL_SIZE / 2;
+                        if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+                            sum += input[sy * width + sx] *
+                                   kernel[ky * KERNEL_SIZE + kx];
+                        }
                     }
                 }
                 output[y * width + x] = sum;
             }
         }
         """
-        
+
         result = translate_cuda_source(cuda_code)
         assert "ripple_id(ripple_block, 0)" in result
         assert "ripple_id(ripple_block, 1)" in result
+
+    def test_shared_memory_vtcm_free_placement(self):
+        """vtcm_free() must be inserted at the kernel's closing brace, after
+        the nested for/if statements that use the shared buffer — not
+        immediately after the malloc."""
+        cuda_code = """
+        __global__ void reduce_sum(float *input, float *output, int n) {
+            __shared__ float sdata[256];
+            int tid = threadIdx.x;
+            sdata[tid] = input[tid];
+            for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+                if (tid < s) sdata[tid] += sdata[tid + s];
+            }
+            if (tid == 0) output[0] = sdata[0];
+        }
+        """
+
+        result = translate_cuda_source(cuda_code)
+        assert "vtcm_malloc(sizeof(float) * (256)" in result
+        assert "vtcm_free(sdata);" in result
+        assert result.index("for (") < result.index("vtcm_free(sdata)")
 
 
 class TestImageProcessing:
