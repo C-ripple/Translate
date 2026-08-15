@@ -49,7 +49,30 @@ required: real kernels commonly pad a dimension by an expression like `TILE_DIM 
 avoid shared-memory bank conflicts (confirmed: this exact shape already exists in
 `tests/examples/cuda_kernels.cu`'s `transpose` kernel).
 
-If `len(dims) == 1`: existing 1D behavior, unchanged.
+If `len(dims) == 1`: existing 1D behavior, unchanged (see the note in section 5 on why
+1D never needed usage-rewriting in the first place).
+
+**Found on review — the non-hexagon branch also needs a matching update.**
+`group(3)`'s meaning changes under the new pattern: today it's the bare inner content of
+the single bracket (`"256"`); under the new pattern it's the *entire* bracket chain,
+brackets included (`"[16][32]"`, or `"[256]"` for the 1D case — still no behavior change
+there since `f"{var_name}[{size_expr}]"` and `f"{var_name}{size_expr}"` produce identical
+text when `size_expr` already carries its own brackets). The non-hexagon branch
+(`ctx.target_platform != "hexagon"`, unchanged VTCM-attribute-free behavior, out of scope
+for this spec otherwise) currently does:
+```python
+decl = f"__attribute__((aligned(128))) {elem_type} {var_name}[{size_expr}]"
+```
+This must become:
+```python
+decl = f"__attribute__((aligned(128))) {elem_type} {var_name}{dims_group}"
+```
+(using the new group(3) directly, without re-wrapping in `[...]`) — otherwise a
+multi-dimensional array on a non-Hexagon target would double-bracket into
+`var_name[[16][32]]`, invalid syntax. This branch's own behavior (tolerate multi-dim
+arrays via the attribute form, unchanged since before the original VTCM migration) is
+not otherwise touched by this spec — this is purely keeping it correct under the new
+capture-group shape.
 
 ### 2. N-dimensional case: allocation size
 
@@ -61,6 +84,11 @@ Not `f"({dims[0]} * {dims[1]})"` — if a dimension is itself an expression
 (`TILE_DIM + 1`), multiplying without per-term parens changes the arithmetic
 (`TILE_DIM + 1 * TILE_DIM` ≠ `(TILE_DIM + 1) * TILE_DIM`, since `*` binds tighter than
 `+` in C).
+
+This formula subsumes the existing 1D case exactly: for `dims = ["256"]`,
+`" * ".join(f"({d})" for d in dims)` produces `"(256)"`, byte-identical to what the
+current code already emits (`sizeof({elem_type}) * ({size_expr})`). No separate 1D/N-D
+branch is needed for the size computation — one formula covers both.
 
 ### 3. Before rewriting anything: verify every other usage is safe to flatten
 
@@ -110,6 +138,15 @@ semantics-preserving, not an approximation.
   N-D-specific usage scan.
 - The outer right-to-left processing across multiple `__shared__` declarations in one
   kernel: unchanged.
+
+**Why the usage-scan (section 3) is new logic only for N-D, not a gap in the existing 1D
+path:** for a 1D array, `var[i]` on a pointer and `var[i]` on a real array compile to
+identical code (`arr[i]` is `*(arr+i)` in C regardless of which declaration `arr` came
+from) — so 1D usages never needed rewriting after `SharedMemoryRule` turned the
+declaration into a pointer; the syntax was already correct by accident. That equivalence
+breaks down at 2+ dimensions: `tile[y][x]` on a real 2D array means "get row `y`, then
+index `x` into it," which has no meaning on a flat `float*` — hence needing the rewrite
+this spec adds, and hence why it's scoped to `len(dims) > 1` only.
 
 ### 6. Close out the tracking issue
 
