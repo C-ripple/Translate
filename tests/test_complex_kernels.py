@@ -354,6 +354,10 @@ class TestImageProcessing:
 
         result = translate_cuda_source(cuda_code)
         assert "cripple_sad(" in result
+        # Pin the call site and the #define together — nothing else in the
+        # suite exercises __sad, so a future edit renaming only one side
+        # would otherwise pass this test while calling an undefined macro.
+        assert "#define cripple_sad" in result
 
     def test_sad_with_bare_atomic_add_fails(self):
         """A bare per-thread atomicAdd (not a recognized block-reduction

@@ -627,7 +627,7 @@ Replace `tests/test_complex_kernels.py:333-349` (`test_sad_computation`) with tw
 
 - [ ] **Step 2: Run tests to verify the rename test fails**
 
-Run: `venv/bin/python -m pytest tests/test_complex_kernels.py::TestAtomicOperations::test_sad_rename tests/test_complex_kernels.py::TestAtomicOperations::test_sad_with_bare_atomic_add_fails -v`
+Run: `venv/bin/python -m pytest tests/test_complex_kernels.py::TestImageProcessing::test_sad_rename tests/test_complex_kernels.py::TestImageProcessing::test_sad_with_bare_atomic_add_fails -v`
 Expected: `test_sad_rename` FAILs (`cripple_sad(` not in result — it's still `ripple_sad`).
 `test_sad_with_bare_atomic_add_fails` should already PASS (Task 2 made this hard-fail).
 
@@ -662,7 +662,7 @@ to:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `venv/bin/python -m pytest tests/test_complex_kernels.py::TestAtomicOperations -v`
+Run: `venv/bin/python -m pytest tests/test_complex_kernels.py::TestImageProcessing -v`
 Expected: PASS (all 5 tests in this class, including the two from Task 2 and the two from this task).
 
 - [ ] **Step 5: Run the full test suite to check for regressions**

@@ -605,7 +605,7 @@ class CUDAToRIPPLETransformer:
     ripple_block_t ripple_block = ripple_set_block_shape(HVX_PE, RIPPLE_BLOCK_DIM_X, RIPPLE_BLOCK_DIM_Y, RIPPLE_BLOCK_DIM_Z)
 
 /* Math intrinsics (translator-provided, not part of the Ripple API — no
-* real Ripple SAD primitive exists) */
+ * real Ripple SAD primitive exists) */
 #define cripple_sad(x, y, z) (__builtin_abs((x) - (y)) + (z))
 
 """
