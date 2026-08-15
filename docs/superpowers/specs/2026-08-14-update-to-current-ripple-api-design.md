@@ -131,8 +131,10 @@ currently supports only one SIMD PE type). Change `_add_ripple_boilerplate()` to
 
 `-fenable-ripple` is required (`temp_ripple_docs`'s troubleshooting guide, "Missing
 ripple_* symbols" section) and is currently undocumented everywhere. Add it in exactly
-four places: `README.md`, the CLI's `source`/`ir` subparser help text
-(`interfaces/cli/cuda2ripple.py`), the generated output file's header comment (natural
+four places: `README.md`, the CLI's top-level `--help` epilog
+(`interfaces/cli/cuda2ripple.py` — shown both on explicit `--help` and on bare
+`cuda2ripple` with no subcommand; per-subparser help is not touched, since the top-level
+epilog is already the discoverable, low-duplication spot), the generated output file's header comment (natural
 to add alongside the item-4 boilerplate change, since it's already being touched), and
 the Flask web UI's `HTML_TEMPLATE` status bar (`interfaces/web/server.py`) — not the
 Flutter app, which has no help/instructions surface today and is out of scope to add
@@ -145,19 +147,19 @@ user-facing copy.
 Existing tests that currently assert *successful* translation of what's becoming a
 hard-fail need to be rewritten to assert `TranslationError`/`ctx.add_error`, not just
 supplemented with new ones:
-- `tests/test_complex_kernels.py`: `test_atomic_cas`, `test_atomic_exch`,
-  `test_atomic_min_max`, and `test_sad_computation` (this one is mixed — it asserts both
-  `ripple_sad` and `ripple_atomic_add` in one kernel; the `atomicAdd` there is a bare
-  per-thread call, not the recognized block-reduction idiom, so it becomes a hard-fail
-  case while the `__sad` part becomes a `cripple_sad` rename — split into two tests).
+- `tests/test_complex_kernels.py`: `test_atomic_cas`, `test_atomic_exch`, and
+  `test_atomic_min_max` (this one already exercises both `atomicMin` and `atomicMax` in
+  one kernel — kept combined, just converted from a success assertion to
+  `pytest.raises(TranslationError)`; between the three rewritten tests, all of
+  Add/Max/Min/CAS/Exch get direct hard-fail coverage, so no further new atomics fixtures
+  are needed). Also `test_sad_computation` (mixed — asserts both `ripple_sad` and
+  `ripple_atomic_add` in one kernel; the `atomicAdd` there is a bare per-thread call, not
+  the recognized block-reduction idiom, so it becomes a hard-fail case while the `__sad`
+  part becomes a `cripple_sad` rename — split into two tests).
 - `tests/test_translation.py`: `test_atomic_add_rule` (asserts `ripple_atomic_add` from a
   direct `AtomicAddRule().apply()` call) and `test_shared_memory_rule` (asserts the old
   `__attribute__((aligned(128)))` + array-declaration output from a direct
   `SharedMemoryRule().apply()` call — needs rewriting to assert the `vtcm_malloc` form).
-
-Additional new coverage:
-- One hard-fail fixture each for `AtomicMaxRule`/`AtomicCASRule`/`AtomicExchRule` beyond
-  what's already covered above (min is covered by `test_atomic_min_max`'s split).
 - VTCM rewrite fixtures, including a multi-statement kernel body to exercise the
   brace-matching `vtcm_free()` insertion.
 - Update `tests/stub_headers/ripple.h`: add `vtcm_malloc`/`vtcm_free`/`HVX_PE`
