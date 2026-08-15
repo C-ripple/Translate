@@ -2,6 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Actual Outcome addendum (post-implementation correction):** every reference in this
+> plan to `temp_ripple_docs/src/ripple-spec/multi-threading.md` and the "barrier +
+> per-lane partial-sum pattern in the Ripple multi-threading guide" is fabricated — no
+> such file or API family exists anywhere in the vendored docs (verified: zero hits for
+> "atomic" or "thd"/"thread" in the entire `temp_ripple_docs/` corpus). See the design
+> spec's own addendum for the full correction. The code blocks below still show the
+> fabricated phrasing as originally written and executed; the actual shipped error
+> messages were corrected in a follow-up commit to drop the false "see this guide"
+> pointer and instead say plainly that no documented Ripple alternative exists. Treat
+> every `f"... multi-threading guide."` string in this document's code blocks as
+> superseded by that correction, not as current shipped text.
+
 **Goal:** Make C-Ripple's source-level translator (`frontends/source/cuda_frontend.py` +
 `core/translation_rules.py`) emit only real Ripple 21.0-alpha3 API calls, so Benoit's
 team can compile and evaluate translated output instead of hitting undefined-symbol

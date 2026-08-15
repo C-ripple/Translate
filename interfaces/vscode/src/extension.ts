@@ -104,15 +104,16 @@ class LocalTranslator {
         // Sync
         output = output.replace(/__syncthreads\s*\(\s*\)/g, '/* __syncthreads: implicit in SIMD */');
 
-        // Atomics: Ripple has no atomics API at all (confirmed against the
-        // Ripple multi-threading guide) — there is no real ripple_atomic_add
-        // to translate to.
+        // Atomics: Ripple has no atomics API at all — confirmed by "atomic"
+        // appearing zero times anywhere in the vendored Ripple docs corpus —
+        // there is no real ripple_atomic_add to translate to, and no
+        // documented alternative pattern to point users at.
         output = output.replace(
             /atomicAdd\s*\(\s*([^,]+),\s*([^)]+)\)/g,
             (match, target, value) => {
                 errors.push(
                     `atomicAdd(${target.trim()}, ${value.trim()}) cannot be translated — Ripple has no atomics ` +
-                    `API. See the barrier + per-lane partial-sum pattern in the Ripple multi-threading guide.`
+                    `API and no documented alternative for this pattern.`
                 );
                 return match;
             }

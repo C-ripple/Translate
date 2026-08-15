@@ -1,5 +1,21 @@
 # Update C-Ripple's source translator to the current Ripple API (21.0-alpha3)
 
+> **Actual Outcome addendum (post-implementation correction):** every reference below to
+> `temp_ripple_docs/src/ripple-spec/multi-threading.md` and the `ripple_thd_*`
+> multicore/thread API family it's cited for is **fabricated** — that file does not exist
+> anywhere in the vendored docs, and neither does `ripple_thd_init`/`ripple_thd_set_block_shape`/
+> etc. (confirmed: zero hits for "atomic" or "thd"/"thread" anywhere in the entire
+> `temp_ripple_docs/` corpus). This came from the initial research subagent's report,
+> which was trusted without independently re-verifying that specific citation. The
+> underlying technical conclusion this section reaches — Ripple has no atomics API, so
+> hard-fail is correct — remains well-supported independent of the fabricated citation
+> (confirmed directly: `atomic` never appears in `api.md`'s full function listing or
+> `niy.md`'s not-yet-implemented list either). Only the "here's the documented
+> alternative pattern, see this guide" framing is false; there is no documented
+> alternative. All shipped error messages, README/ARCHITECTURE.md text, and this spec's
+> prose citing the fabricated guide were corrected in a follow-up commit — read this
+> section as history of what was believed at the time, not current fact.
+
 ## Context
 
 Benoit (Qualcomm) emailed asking us to update C-Ripple to the current Ripple API — his

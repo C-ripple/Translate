@@ -174,7 +174,7 @@ CUDA LLVM IR (.ll)
 | `__global__` | Regular function + `ripple_set_block_shape()` | |
 | `__shared__` | `vtcm_malloc()`/`vtcm_free()` pair | Hexagon tightly-coupled memory |
 | `__syncthreads()` | Implicit (comment) | SIMD lanes are lockstep |
-| `atomicAdd()` | *(no equivalent)* | Ripple has no atomics API — see the barrier + per-lane partial-sum pattern in the Ripple multi-threading guide |
+| `atomicAdd()` | *(no equivalent)* | Ripple has no atomics API and no documented alternative for this pattern |
 | `__shfl_down_sync()` | `ripple_shuffle(val, fn)` | With permutation function |
 
 ## Hexagon HVX Configuration

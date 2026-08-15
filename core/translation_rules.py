@@ -10,10 +10,9 @@ Key Mappings:
     CUDA blockDim.{x,y,z}   ->  ripple_get_block_size(block, {0,1,2})
     CUDA __shared__         ->  vtcm_malloc()/vtcm_free() (Hexagon)
     CUDA __syncthreads()    ->  implicit (SIMD model) or explicit barrier
-    CUDA atomicAdd          ->  no equivalent — hard-fails (see the Ripple
-                                 multi-threading guide's barrier + partial-sum
-                                 pattern), except the recognized block-reduction
-                                 idiom, which maps to ripple_reduceadd
+    CUDA atomicAdd          ->  no documented equivalent — hard-fails, except
+                                 the recognized block-reduction idiom, which
+                                 maps to ripple_reduceadd
     CUDA warp shuffles      ->  ripple_shuffle with permutation function
 """
 
@@ -1561,9 +1560,8 @@ class AtomicAddRule(TranslationRule):
                 f"reduction (every lane computes a value, then they're "
                 f"combined into one result), restructure it as a "
                 f"shared-memory or full-warp reduction and it will be "
-                f"recognized automatically. Otherwise, see the barrier + "
-                f"per-lane partial-sum pattern in the Ripple "
-                f"multi-threading guide."
+                f"recognized automatically. Otherwise, there is no "
+                f"documented Ripple equivalent for this pattern."
             )
             return match.group(0)
 
@@ -1591,8 +1589,8 @@ class AtomicMaxRule(TranslationRule):
                 f"atomicMax({target}, {value}) cannot be translated — Ripple "
                 f"has no atomics API. If this is a full-block max reduction, "
                 f"restructure it to use ripple_reducemax directly. "
-                f"Otherwise, see the barrier + per-lane partial-result "
-                f"pattern in the Ripple multi-threading guide."
+                f"Otherwise, there is no documented Ripple equivalent for "
+                f"this pattern."
             )
             return match.group(0)
 
@@ -1620,8 +1618,8 @@ class AtomicMinRule(TranslationRule):
                 f"atomicMin({target}, {value}) cannot be translated — Ripple "
                 f"has no atomics API. If this is a full-block min reduction, "
                 f"restructure it to use ripple_reducemin directly. "
-                f"Otherwise, see the barrier + per-lane partial-result "
-                f"pattern in the Ripple multi-threading guide."
+                f"Otherwise, there is no documented Ripple equivalent for "
+                f"this pattern."
             )
             return match.group(0)
 
@@ -1649,9 +1647,8 @@ class AtomicCASRule(TranslationRule):
             ctx.add_error(
                 f"atomicCAS({target}, {compare}, {value}) cannot be "
                 f"translated — Ripple has no atomics API, and "
-                f"compare-and-swap has no reduction-idiom equivalent. See "
-                f"the barrier + per-lane partial-result pattern in the "
-                f"Ripple multi-threading guide."
+                f"compare-and-swap has no reduction-idiom equivalent and "
+                f"no documented Ripple alternative."
             )
             return match.group(0)
 
@@ -1678,9 +1675,8 @@ class AtomicExchRule(TranslationRule):
             ctx.add_error(
                 f"atomicExch({target}, {value}) cannot be translated — "
                 f"Ripple has no atomics API, and exchange has no "
-                f"reduction-idiom equivalent. See the barrier + per-lane "
-                f"partial-result pattern in the Ripple multi-threading "
-                f"guide."
+                f"reduction-idiom equivalent and no documented Ripple "
+                f"alternative."
             )
             return match.group(0)
 

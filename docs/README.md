@@ -111,7 +111,7 @@ python -m cuda2ripple.interfaces.web.server --port 5000
 | `__device__` | `static inline` |
 | `__shared__ T arr[N]` | `T *arr = vtcm_malloc(sizeof(T) * N, /*align_as=*/128); ... vtcm_free(arr);` |
 | `__syncthreads()` | Implicit (SIMD lanes are lockstep) |
-| `atomicAdd(ptr, val)` | *(no equivalent — Ripple has no atomics API; see the barrier + per-lane partial-sum pattern in the Ripple multi-threading guide)* |
+| `atomicAdd(ptr, val)` | *(no equivalent — Ripple has no atomics API and no documented alternative for this pattern)* |
 | `__shfl_down_sync(mask, val, delta)` | `ripple_shuffle(val, shuffle_fn)` |
 
 ## Architecture
@@ -237,9 +237,9 @@ void reduceSum_ripple(...) {
 ```
 
 Note this example writes the block's single reduced value directly rather than using
-`atomicAdd` — Ripple has no atomics API, so accumulating across *multiple* blocks into
-one shared output needs the barrier + per-lane partial-sum pattern from the Ripple
-multi-threading guide instead; see the Translation Mappings table above.
+`atomicAdd` — Ripple has no atomics API, and accumulating across *multiple* blocks into
+one shared output has no documented Ripple equivalent; see the Translation Mappings
+table above.
 
 ## Project Structure
 
