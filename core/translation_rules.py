@@ -1426,121 +1426,159 @@ class ButterflyAllReduceRule(TranslationRule):
 # =============================================================================
 
 class AtomicAddRule(TranslationRule):
-    """Translates atomicAdd to ripple_reduction or HVX scatter."""
-    
+    """Diagnoses atomicAdd calls with no Ripple equivalent.
+
+    This only ever fires on atomicAdd(...) text still present after
+    WarpReductionRule/WarpMinMaxReductionRule/ButterflyAllReduceRule have
+    already run (priority 84-86, all higher than this rule's 60) — those
+    rules already translate the recognized single-output block-reduction
+    idiom to real ripple_reduceadd(). Anything reaching this rule is a
+    genuinely untranslatable atomicAdd, not a regression.
+    """
+
     PATTERN = r'atomicAdd\s*\(\s*([^,]+),\s*([^)]+)\)'
-    
+
     def __init__(self):
         super().__init__(
             name="atomic_add",
-            description="Translate atomicAdd to RIPPLE reduction",
+            description="Diagnose unsupported atomicAdd (no Ripple atomics API)",
             cuda_pattern=self.PATTERN,
             priority=60
         )
-    
+
     def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
         def replace(match):
             target = match.group(1).strip()
             value = match.group(2).strip()
-            
-            if ctx.target_platform == "hexagon":
-                ctx.add_warning(
-                    f"atomicAdd on {target}: consider HVX scatter-accumulate "
-                    f"for better performance"
-                )
-                return f"ripple_atomic_add({target}, {value}) /* HVX: use Q6_vscatter_acc */"
-            else:
-                return f"ripple_atomic_add({target}, {value})"
-        
+            ctx.add_error(
+                f"atomicAdd({target}, {value}) cannot be translated — Ripple "
+                f"has no atomics API. If this is a single-output block "
+                f"reduction (every lane computes a value, then they're "
+                f"combined into one result), restructure it as a "
+                f"shared-memory or full-warp reduction and it will be "
+                f"recognized automatically. Otherwise, see the barrier + "
+                f"per-lane partial-sum pattern in the Ripple "
+                f"multi-threading guide."
+            )
+            return match.group(0)
+
         return re.sub(self.PATTERN, replace, cuda_code)
 
 
 class AtomicMaxRule(TranslationRule):
-    """Translates atomicMax."""
-    
+    """Diagnoses atomicMax calls with no Ripple equivalent."""
+
     PATTERN = r'atomicMax\s*\(\s*([^,]+),\s*([^)]+)\)'
-    
+
     def __init__(self):
         super().__init__(
             name="atomic_max",
-            description="Translate atomicMax to RIPPLE",
+            description="Diagnose unsupported atomicMax (no Ripple atomics API)",
             cuda_pattern=self.PATTERN,
             priority=60
         )
-    
+
     def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
         def replace(match):
             target = match.group(1).strip()
             value = match.group(2).strip()
-            return f"ripple_atomic_max({target}, {value})"
-        
+            ctx.add_error(
+                f"atomicMax({target}, {value}) cannot be translated — Ripple "
+                f"has no atomics API. If this is a full-block max reduction, "
+                f"restructure it to use ripple_reducemax directly. "
+                f"Otherwise, see the barrier + per-lane partial-result "
+                f"pattern in the Ripple multi-threading guide."
+            )
+            return match.group(0)
+
         return re.sub(self.PATTERN, replace, cuda_code)
 
 
 class AtomicMinRule(TranslationRule):
-    """Translates atomicMin."""
-    
+    """Diagnoses atomicMin calls with no Ripple equivalent."""
+
     PATTERN = r'atomicMin\s*\(\s*([^,]+),\s*([^)]+)\)'
-    
+
     def __init__(self):
         super().__init__(
             name="atomic_min",
-            description="Translate atomicMin to RIPPLE",
+            description="Diagnose unsupported atomicMin (no Ripple atomics API)",
             cuda_pattern=self.PATTERN,
             priority=60
         )
-    
+
     def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
         def replace(match):
             target = match.group(1).strip()
             value = match.group(2).strip()
-            return f"ripple_atomic_min({target}, {value})"
-        
+            ctx.add_error(
+                f"atomicMin({target}, {value}) cannot be translated — Ripple "
+                f"has no atomics API. If this is a full-block min reduction, "
+                f"restructure it to use ripple_reducemin directly. "
+                f"Otherwise, see the barrier + per-lane partial-result "
+                f"pattern in the Ripple multi-threading guide."
+            )
+            return match.group(0)
+
         return re.sub(self.PATTERN, replace, cuda_code)
 
 
 class AtomicCASRule(TranslationRule):
-    """Translates atomicCAS (compare-and-swap)."""
-    
+    """Diagnoses atomicCAS calls with no Ripple equivalent."""
+
     PATTERN = r'atomicCAS\s*\(\s*([^,]+),\s*([^,]+),\s*([^)]+)\)'
-    
+
     def __init__(self):
         super().__init__(
             name="atomic_cas",
-            description="Translate atomicCAS to RIPPLE",
+            description="Diagnose unsupported atomicCAS (no Ripple atomics API)",
             cuda_pattern=self.PATTERN,
             priority=60
         )
-    
+
     def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
         def replace(match):
             target = match.group(1).strip()
             compare = match.group(2).strip()
             value = match.group(3).strip()
-            return f"ripple_atomic_cas({target}, {compare}, {value})"
-        
+            ctx.add_error(
+                f"atomicCAS({target}, {compare}, {value}) cannot be "
+                f"translated — Ripple has no atomics API, and "
+                f"compare-and-swap has no reduction-idiom equivalent. See "
+                f"the barrier + per-lane partial-result pattern in the "
+                f"Ripple multi-threading guide."
+            )
+            return match.group(0)
+
         return re.sub(self.PATTERN, replace, cuda_code)
 
 
 class AtomicExchRule(TranslationRule):
-    """Translates atomicExch."""
-    
+    """Diagnoses atomicExch calls with no Ripple equivalent."""
+
     PATTERN = r'atomicExch\s*\(\s*([^,]+),\s*([^)]+)\)'
-    
+
     def __init__(self):
         super().__init__(
             name="atomic_exch",
-            description="Translate atomicExch to RIPPLE",
+            description="Diagnose unsupported atomicExch (no Ripple atomics API)",
             cuda_pattern=self.PATTERN,
             priority=60
         )
-    
+
     def apply(self, cuda_code: str, ctx: TranslationContext) -> str:
         def replace(match):
             target = match.group(1).strip()
             value = match.group(2).strip()
-            return f"ripple_atomic_exch({target}, {value})"
-        
+            ctx.add_error(
+                f"atomicExch({target}, {value}) cannot be translated — "
+                f"Ripple has no atomics API, and exchange has no "
+                f"reduction-idiom equivalent. See the barrier + per-lane "
+                f"partial-result pattern in the Ripple multi-threading "
+                f"guide."
+            )
+            return match.group(0)
+
         return re.sub(self.PATTERN, replace, cuda_code)
 
 

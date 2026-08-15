@@ -31,8 +31,11 @@ cuda_kernels.cu is a larger, 10-kernel fixture that was previously
 orphaned entirely (wired into no test) because it failed to translate
 at all — a softmax kernel's max-reduction shuffle loop (fmaxf, not
 '+=') didn't match any rule's shape. WarpMinMaxReductionRule closes
-that gap, so this file now translates successfully and is covered
-here structurally. It's deliberately NOT in SYNTAX_CHECK_PARAMS yet:
+that gap, so this file's shuffle loops now translate correctly — but
+the file as a whole now correctly hard-fails on its 5 unrelated
+atomicAdd/atomicMax call sites (see
+test_cuda_kernels_file_hard_fails_on_atomics below). It's deliberately
+NOT in SYNTAX_CHECK_PARAMS yet:
 getting it through a real clang syntax check requires fixing several
 separate, unrelated gaps this file is the first fixture to exercise —
 confirmed directly against the actual clang output, not assumed:
@@ -65,6 +68,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from frontends.source.cuda_frontend import translate_cuda_source
+from core.semantic_model import TranslationError
 from tests.compile_verify import requires_clang, verify_ripple_syntax
 
 EXAMPLES_DIR = Path(__file__).parent / "examples"
@@ -72,19 +76,16 @@ EXAMPLES_DIR = Path(__file__).parent / "examples"
 KERNEL_FILES = [
     "ast_flat.cu",
     "ast_if_no_braces.cu",
-    "atomics_cas_exch.cu",
     "bitwise_intrinsics.cu",
     "global_thread_index.cu",
     "warp_reduction.cu",
     "warp_shuffle_xor.cu",
     "butterfly_reduction.cu",
-    "cuda_kernels.cu",
 ]
 
 SYNTAX_CHECK_PARAMS = [
     "ast_flat.cu",
     "ast_if_no_braces.cu",
-    "atomics_cas_exch.cu",
     "bitwise_intrinsics.cu",
     "global_thread_index.cu",
     "warp_reduction.cu",
@@ -101,6 +102,23 @@ def test_translates_without_error(filename):
     assert "__global__" not in result, f"{filename}: untranslated __global__ remains"
 
 
+def test_cuda_kernels_file_hard_fails_on_atomics():
+    """cuda_kernels.cu (see module docstring above) mixes many patterns in
+    one file, including 5 atomicAdd/atomicMax call sites that aren't the
+    recognized single-block reduction idiom. The whole file now correctly
+    hard-fails rather than silently mistranslating them.
+    CUDAToRIPPLETransformer.transform() accumulates every rule's errors
+    before raising (it doesn't stop at the first), so a real translation
+    bug in one of this file's other, unrelated kernels — the shuffle loops
+    and math intrinsics this file also exercises — would still show up as
+    an additional, distinguishable error here rather than being masked."""
+    source = (EXAMPLES_DIR / "cuda_kernels.cu").read_text()
+    with pytest.raises(TranslationError) as exc_info:
+        translate_cuda_source(source)
+
+    assert len(exc_info.value.errors) >= 5
+
+
 @requires_clang
 @pytest.mark.parametrize("filename", SYNTAX_CHECK_PARAMS)
 def test_translated_output_is_valid_syntax(filename):
@@ -111,3 +129,12 @@ def test_translated_output_is_valid_syntax(filename):
         f"{filename}: translated output failed syntax check:\n{output}\n\n"
         f"--- translated source ---\n{translated}"
     )
+
+
+def test_atomics_cas_exch_hard_fails():
+    """atomicCAS/atomicExch have no Ripple equivalent — this fixture's sole
+    purpose (both calls, no other content) now exercises the hard-fail
+    path rather than translation."""
+    source = (EXAMPLES_DIR / "atomics_cas_exch.cu").read_text()
+    with pytest.raises(TranslationError):
+        translate_cuda_source(source)

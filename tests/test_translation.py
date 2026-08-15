@@ -128,13 +128,18 @@ class TestTranslationRules:
         assert "sdata[256]" in result
     
     def test_atomic_add_rule(self):
+        """atomicAdd has no Ripple equivalent outside a recognized
+        reduction idiom (handled separately by WarpReductionRule etc.) —
+        AtomicAddRule itself must hard-fail, not emit a fictional call."""
         rule = AtomicAddRule()
         ctx = TranslationContext()
-        
+
         source = "atomicAdd(&sum, val)"
         result = rule.apply(source, ctx)
-        
-        assert "ripple_atomic_add" in result
+
+        assert ctx.has_errors()
+        assert "atomicAdd" in ctx.errors[0]
+        assert result == source  # left untranslated, not rewritten
 
 
 class TestTranslationRuleEngine:

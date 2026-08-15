@@ -604,21 +604,6 @@ class CUDAToRIPPLETransformer:
 #define RIPPLE_SETUP_BLOCK() \\
     ripple_block_t ripple_block = ripple_set_block_shape(HVX_PE, RIPPLE_BLOCK_DIM_X, RIPPLE_BLOCK_DIM_Y, RIPPLE_BLOCK_DIM_Z)
 
-/* Atomic operation wrappers for Hexagon */
-#ifdef __HEXAGON__
-#define ripple_atomic_add(ptr, val) __builtin_atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST)
-#define ripple_atomic_max(ptr, val) __sync_fetch_and_max(ptr, val)
-#define ripple_atomic_min(ptr, val) __sync_fetch_and_min(ptr, val)
-#define ripple_atomic_cas(ptr, cmp, val) __sync_val_compare_and_swap(ptr, cmp, val)
-#define ripple_atomic_exch(ptr, val) __sync_lock_test_and_set(ptr, val)
-#else
-#define ripple_atomic_add(ptr, val) (*(ptr) += (val))
-#define ripple_atomic_max(ptr, val) do { if ((val) > *(ptr)) *(ptr) = (val); } while(0)
-#define ripple_atomic_min(ptr, val) do { if ((val) < *(ptr)) *(ptr) = (val); } while(0)
-#define ripple_atomic_cas(ptr, cmp, val) (*(ptr) == (cmp) ? (*(ptr) = (val), (cmp)) : *(ptr))
-#define ripple_atomic_exch(ptr, val) ({ typeof(*(ptr)) __old = *(ptr); *(ptr) = (val); __old; })
-#endif
-
 /* Math intrinsics */
 #define ripple_sad(x, y, z) (__builtin_abs((x) - (y)) + (z))
 

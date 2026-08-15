@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from frontends.source.cuda_frontend import translate_cuda_source
-from core.semantic_model import TranslationContext
+from frontends.source.cuda_frontend import translate_cuda_source, CUDAToRIPPLETransformer
+from core.semantic_model import TranslationContext, TranslationError
 
 
 class TestMatrixOperations:
@@ -99,31 +99,39 @@ class TestReductionKernels:
     """Tests for reduction operations."""
     
     def test_warp_reduction_optimization(self):
-        """Test that warp reduction loops are optimized."""
+        """Warp reduction loops are optimized to ripple_reduceadd, but a
+        subsequent single-thread atomicAdd (writing the already-reduced
+        value into global memory) correctly hard-fails — Ripple has no
+        atomics API, and this translator doesn't yet model CUDA's
+        multi-block grid execution, so there's no safe way to know whether
+        a plain (non-atomic) write would be correct here."""
         cuda_code = """
         __global__ void reduce_sum(float *input, float *output, int N) {
             int tid = threadIdx.x;
             int idx = blockIdx.x * blockDim.x + tid;
-            
+
             float val = (idx < N) ? input[idx] : 0.0f;
-            
+
             // Warp reduction
             for (int offset = warpSize/2; offset > 0; offset /= 2) {
                 val += __shfl_down_sync(0xffffffff, val, offset);
             }
-            
+
             if (tid == 0) {
                 atomicAdd(output, val);
             }
         }
         """
-        
-        result = translate_cuda_source(cuda_code)
-        
-        # Verify warp reduction was optimized
-        assert "ripple_reduceadd" in result
-        assert "Warp Reduction Loop" in result
-        assert "ripple_atomic_add" in result
+
+        ctx = TranslationContext()
+        transformer = CUDAToRIPPLETransformer(ctx)
+        with pytest.raises(TranslationError):
+            transformer.transform(cuda_code)
+
+        # The shuffle loop itself is still correctly recognized — only the
+        # trailing atomicAdd (no Ripple equivalent) is the hard-fail.
+        assert any("Warp Reduction" in w for w in ctx.warnings)
+        assert any("atomicAdd" in e for e in ctx.errors)
     
     def test_block_reduction(self):
         """Test block-level reduction with shared memory."""
@@ -202,39 +210,39 @@ class TestAtomicOperations:
     """Tests for atomic operations."""
     
     def test_atomic_cas(self):
-        """Test compare-and-swap."""
+        """Ripple has no atomics API — atomicCAS must hard-fail, not
+        translate to a fictional ripple_atomic_cas() call."""
         cuda_code = """
         __global__ void cas_kernel(int *lock) {
             int old = atomicCAS(lock, 0, 1);
         }
         """
-        
-        result = translate_cuda_source(cuda_code)
-        assert "ripple_atomic_cas" in result
-    
+
+        with pytest.raises(TranslationError):
+            translate_cuda_source(cuda_code)
+
     def test_atomic_exch(self):
-        """Test atomic exchange."""
+        """Ripple has no atomics API — atomicExch must hard-fail."""
         cuda_code = """
         __global__ void exch_kernel(int *data, int new_val) {
             int old = atomicExch(data, new_val);
         }
         """
-        
-        result = translate_cuda_source(cuda_code)
-        assert "ripple_atomic_exch" in result
-    
+
+        with pytest.raises(TranslationError):
+            translate_cuda_source(cuda_code)
+
     def test_atomic_min_max(self):
-        """Test atomic min and max."""
+        """Ripple has no atomics API — atomicMin/atomicMax must hard-fail."""
         cuda_code = """
         __global__ void minmax_kernel(int *data, int val) {
             atomicMin(data, val);
             atomicMax(data + 1, val);
         }
         """
-        
-        result = translate_cuda_source(cuda_code)
-        assert "ripple_atomic_min" in result
-        assert "ripple_atomic_max" in result
+
+        with pytest.raises(TranslationError):
+            translate_cuda_source(cuda_code)
 
 
 class TestConvolutionKernels:
