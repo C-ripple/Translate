@@ -109,7 +109,7 @@ python -m cuda2ripple.interfaces.web.server --port 5000
 | `blockIdx.x` | Outer loop variable `block_idx_x` |
 | `__global__ void kernel()` | `void kernel_ripple(grid_dims, block_dims, ...)` |
 | `__device__` | `static inline` |
-| `__shared__ T arr[N]` | `T *arr = vtcm_malloc(sizeof(T) * N, /*align_as=*/128); ... vtcm_free(arr);` |
+| `__shared__ T arr[N]` | `T *arr = vtcm_malloc(sizeof(T) * N, /*align_as=*/128); ... vtcm_free(arr);` (multi-dimensional arrays are flattened to one allocation, with every indexing site rewritten to flat row-major indexing) |
 | `__syncthreads()` | Implicit (SIMD lanes are lockstep) |
 | `atomicAdd(ptr, val)` | *(no equivalent — Ripple has no atomics API and no documented alternative for this pattern)* |
 | `__shfl_down_sync(mask, val, delta)` | `ripple_shuffle(val, shuffle_fn)` |

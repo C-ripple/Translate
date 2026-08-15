@@ -338,6 +338,13 @@ class SharedMemoryRule(TranslationRule):
                         stride_dims = dims[i + 1:]
                         if stride_dims:
                             stride = " * ".join(f"({d})" for d in stride_dims)
+                            # The extra wrap below is semantically redundant
+                            # for a single-term stride (multiplication is
+                            # associative either way) — it exists only to
+                            # match a single-vs-multi-term formula shared
+                            # with total_size_expr below. Don't "simplify"
+                            # this away: making it unconditional broke the
+                            # 1D case there once already (see that comment).
                             if len(stride_dims) > 1:
                                 stride = f"({stride})"
                             terms.append(f"({idx_expr}) * {stride}")
@@ -359,6 +366,15 @@ class SharedMemoryRule(TranslationRule):
             free_call = f"\n    vtcm_free({var_name});"
             result = result[:free_pos] + free_call + result[free_pos:]
 
+            # dims[0] is used unwrapped (not "(dims[0])") for the 1D case:
+            # the malloc f-string below already supplies one pair of parens
+            # around total_size_expr, so wrapping it again here would
+            # double-parenthesize 1D output (sizeof(T) * ((256)) instead of
+            # sizeof(T) * (256)) and break test_shared_memory_rule /
+            # test_shared_memory_vtcm_free_placement, which assert the
+            # single-paren form exactly. This is the same asymmetry as the
+            # stride formula above, for the same reason — it's locking an
+            # exact string, not a mathematical necessity.
             if len(dims) > 1:
                 total_size_expr = " * ".join(f"({d})" for d in dims)
             else:
