@@ -172,9 +172,9 @@ CUDA LLVM IR (.ll)
 | `blockDim.x` | `ripple_get_block_size(block, 0)` | Vector width |
 | `blockIdx.x` | Loop variable `block_idx_x` | Grid parallelism → loops |
 | `__global__` | Regular function + `ripple_set_block_shape()` | |
-| `__shared__` | VTCM-allocated array | Hexagon tightly-coupled memory |
+| `__shared__` | `vtcm_malloc()`/`vtcm_free()` pair | Hexagon tightly-coupled memory |
 | `__syncthreads()` | Implicit (comment) | SIMD lanes are lockstep |
-| `atomicAdd()` | `ripple_atomic_add()` | Or HVX scatter-accumulate |
+| `atomicAdd()` | *(no equivalent)* | Ripple has no atomics API — see the barrier + per-lane partial-sum pattern in the Ripple multi-threading guide |
 | `__shfl_down_sync()` | `ripple_shuffle(val, fn)` | With permutation function |
 
 ## Hexagon HVX Configuration

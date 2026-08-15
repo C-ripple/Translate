@@ -109,9 +109,9 @@ python -m cuda2ripple.interfaces.web.server --port 5000
 | `blockIdx.x` | Outer loop variable `block_idx_x` |
 | `__global__ void kernel()` | `void kernel_ripple(grid_dims, block_dims, ...)` |
 | `__device__` | `static inline` |
-| `__shared__ T arr[N]` | `__attribute__((section(".vtcm"))) T arr[N]` |
+| `__shared__ T arr[N]` | `T *arr = vtcm_malloc(sizeof(T) * N, /*align_as=*/128); ... vtcm_free(arr);` |
 | `__syncthreads()` | Implicit (SIMD lanes are lockstep) |
-| `atomicAdd(ptr, val)` | `ripple_atomic_add(ptr, val)` |
+| `atomicAdd(ptr, val)` | *(no equivalent — Ripple has no atomics API; see the barrier + per-lane partial-sum pattern in the Ripple multi-threading guide)* |
 | `__shfl_down_sync(mask, val, delta)` | `ripple_shuffle(val, shuffle_fn)` |
 
 ## Architecture
@@ -207,12 +207,12 @@ __global__ void reduceSum(float *input, float *output, int n) {
     int tid = threadIdx.x;
     sdata[tid] = input[tid];
     __syncthreads();
-    
+
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) sdata[tid] += sdata[tid + s];
         __syncthreads();
     }
-    if (tid == 0) atomicAdd(output, sdata[0]);
+    if (tid == 0) output[0] = sdata[0];
 }
 ```
 
@@ -221,19 +221,25 @@ __global__ void reduceSum(float *input, float *output, int n) {
 #include <ripple.h>
 
 void reduceSum_ripple(...) {
-    __attribute__((section(".vtcm"))) __attribute__((aligned(128))) float sdata[256];
-    
+    float *sdata = vtcm_malloc(sizeof(float) * (256), /*align_as=*/128);
+
     ripple_block_t ripple_block = ripple_set_block_shape(HVX_PE, 256);
     int tid = ripple_id(ripple_block, 0);
     sdata[tid] = input[tid];
     // __syncthreads: implicit in SIMD model
-    
+
     for (int s = ripple_get_block_size(ripple_block, 0) / 2; s > 0; s >>= 1) {
         if (tid < s) sdata[tid] += sdata[tid + s];
     }
-    if (tid == 0) ripple_atomic_add(output, sdata[0]);
+    if (tid == 0) output[0] = sdata[0];
+    vtcm_free(sdata);
 }
 ```
+
+Note this example writes the block's single reduced value directly rather than using
+`atomicAdd` — Ripple has no atomics API, so accumulating across *multiple* blocks into
+one shared output needs the barrier + per-lane partial-sum pattern from the Ripple
+multi-threading guide instead; see the Translation Mappings table above.
 
 ## Project Structure
 

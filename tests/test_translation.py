@@ -1406,13 +1406,13 @@ __global__ void kernel(float *data, int lane) {
 """
     result = translate_cuda_source(source)
     assert "__shfl_xor_sync" not in result
-    # NOTE: deliberately not "?" not in result — like the "if (" note on
-    # test_predicated_unroll_does_not_collide_with_plain_unroll_rule
-    # above, the RIPPLE boilerplate unconditionally emits a
-    # ripple_atomic_cas fallback macro containing a '?' ternary, so
-    # that check would fail for any translation output regardless of
-    # this rule's behavior. Assert directly on the original ternary
-    # being gone from the kernel body instead.
+    # NOTE: deliberately not "?" not in result — asserting the original
+    # ternary is gone from the kernel body is a more direct check than a
+    # blanket "no '?' anywhere in the file" assertion regardless. (This
+    # comment previously cited a since-removed ripple_atomic_cas fallback
+    # macro that also contained a '?' as the reason — that macro no
+    # longer exists, but the more-direct assertion below is still the
+    # better check on its own merits.)
     assert "? 1 : 2" not in result
     assert result.count("ripple_shuffle(") == 2
     assert "if (lane < 16)" in result
@@ -1569,11 +1569,13 @@ __global__ void plainLoop(float *data) {
 }
 """
     result = translate_cuda_source(source)
-    # NOTE: deliberately not "if (" not in result — the RIPPLE
-    # boilerplate header unconditionally emits ripple_atomic_max/min
-    # macros containing "if (", so that check would fail for any
-    # translation output regardless of this rule's behavior. Assert
-    # directly on which rule's warning fired instead.
+    # NOTE: deliberately not "if (" not in result — asserting on which
+    # rule's warning fired is a more direct, less brittle check than a
+    # blanket "no 'if (' anywhere in the file" assertion regardless.
+    # (This comment previously cited since-removed ripple_atomic_max/min
+    # fallback macros that also contained "if (" as the reason — those
+    # macros no longer exist, but the more-direct assertion below is
+    # still the better check on its own merits.)
     assert "Unrolled loop over 'i'" in result  # plain rule fired
     assert "Predicated-unrolled" not in result  # new rule did not fire
     assert result.count("ripple_shuffle(") == 3  # i = 1, 2, 4
