@@ -34,7 +34,7 @@ assumes `<ripple.h>` provides it. It doesn't: every example in the vendored Ripp
 self-defines its own PE constant (`#define VECTOR_PE 0`), and the release notes confirm
 the value is unused (Ripple currently supports only one SIMD PE type).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/test_translation.py`, after the `TestTranslationRuleEngine` class (end of
 file is fine — check the current end of file and append):
@@ -53,12 +53,12 @@ class TestBoilerplateGeneration:
         assert "#define HVX_PE 0" in result
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestBoilerplateGeneration::test_hvx_pe_self_defined -v`
 Expected: FAIL — `assert "#define HVX_PE 0" in result` is False (nothing defines `HVX_PE` today).
 
-- [ ] **Step 3: Add the `#define`**
+- [x] **Step 3: Add the `#define`**
 
 In `frontends/source/cuda_frontend.py`, replace lines 587-593:
 
@@ -92,18 +92,18 @@ with:
 """
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestBoilerplateGeneration::test_hvx_pe_self_defined -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the full test suite to check for regressions**
+- [x] **Step 5: Run the full test suite to check for regressions**
 
 Run: `venv/bin/python -m pytest -v`
 Expected: All previously-passing tests still pass (this change only adds a line; nothing
 depended on its absence).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add frontends/source/cuda_frontend.py tests/test_translation.py
@@ -137,7 +137,7 @@ reduce-then-`atomicAdd`-once) already translates correctly via `WarpReductionRul
 after those higher-priority rules ran, meaning it's text those rules didn't recognize as
 a reduction idiom. Hard-failing it is safe.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Replace `tests/test_translation.py:130-137` (`test_atomic_add_rule`):
 
@@ -203,14 +203,14 @@ Replace `tests/test_complex_kernels.py:204-237` (`test_atomic_cas`, `test_atomic
             translate_cuda_source(cuda_code)
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestTranslationRules::test_atomic_add_rule tests/test_complex_kernels.py::TestAtomicOperations -v`
 Expected: FAIL — `test_atomic_add_rule` fails on `assert ctx.has_errors()` (no error
 recorded today); the other three fail because `translate_cuda_source` returns normally
 instead of raising.
 
-- [ ] **Step 3: Rewrite the five atomic rules**
+- [x] **Step 3: Rewrite the five atomic rules**
 
 In `core/translation_rules.py`, replace lines 1428-1544 (all five `Atomic*Rule` classes,
 from `class AtomicAddRule(TranslationRule):` through the end of `AtomicExchRule`) with:
@@ -373,19 +373,19 @@ class AtomicExchRule(TranslationRule):
         return re.sub(self.PATTERN, replace, cuda_code)
 ```
 
-- [ ] **Step 4: Remove the fake atomic macros from generated output**
+- [x] **Step 4: Remove the fake atomic macros from generated output**
 
 In `frontends/source/cuda_frontend.py`, delete lines 601-614 (the entire
 `/* Atomic operation wrappers for Hexagon */` block, from `#ifdef __HEXAGON__` through
 the matching `#endif`) — nothing calls these macros anymore, and they reference
 functions (`ripple_atomic_add` etc.) that were never real Ripple API.
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestTranslationRules::test_atomic_add_rule tests/test_complex_kernels.py::TestAtomicOperations -v`
 Expected: PASS
 
-- [ ] **Step 6: Run the full test suite — expect 5 failures, diagnose each**
+- [x] **Step 6: Run the full test suite — expect 5 failures, diagnose each**
 
 Run: `venv/bin/python -m pytest -v`
 
@@ -414,7 +414,7 @@ really does launch many blocks needs a genuine cross-block accumulation primitiv
 that launches a single block doesn't need atomicity at all — the translator has no way
 to tell which case it's looking at, so hard-failing is the only honest option.
 
-- [ ] **Step 6a: Fix `test_warp_reduction_optimization`**
+- [x] **Step 6a: Fix `test_warp_reduction_optimization`**
 
 In `tests/test_complex_kernels.py`, add `CUDAToRIPPLETransformer` to the existing import
 (alongside `translate_cuda_source`):
@@ -465,7 +465,7 @@ Replace the `test_warp_reduction_optimization` method (in `TestReductionKernels`
 Run: `venv/bin/python -m pytest tests/test_complex_kernels.py::TestReductionKernels::test_warp_reduction_optimization -v`
 Expected: PASS
 
-- [ ] **Step 6b: Fix the `atomics_cas_exch.cu` fixture tests**
+- [x] **Step 6b: Fix the `atomics_cas_exch.cu` fixture tests**
 
 In `tests/test_real_kernels.py`, add `TranslationError` to the imports:
 
@@ -492,7 +492,7 @@ Run: `venv/bin/python -m pytest tests/test_real_kernels.py -v -k "atomics_cas_ex
 Expected: no test collected for `atomics_cas_exch.cu` under the two generic tests; the
 new `test_atomics_cas_exch_hard_fails` passes.
 
-- [ ] **Step 6c: Fix the `cuda_kernels.cu` fixture test and its stale docstring**
+- [x] **Step 6c: Fix the `cuda_kernels.cu` fixture test and its stale docstring**
 
 `cuda_kernels.cu` is a 10-kernel fixture with 5 unrelated atomic call sites (lines 116,
 129, 199, 254, 268 — none are the recognized single-block reduction idiom). It's already
@@ -532,14 +532,14 @@ part is still true and unrelated to this change).
 Run: `venv/bin/python -m pytest tests/test_real_kernels.py::test_cuda_kernels_file_hard_fails_on_atomics -v`
 Expected: PASS
 
-- [ ] **Step 6d: Run the full test suite again to confirm only the expected failure remains**
+- [x] **Step 6d: Run the full test suite again to confirm only the expected failure remains**
 
 Run: `venv/bin/python -m pytest -v`
 Expected: All pass except `test_sad_computation` in `tests/test_complex_kernels.py` (it
 combines `__sad` with a bare `atomicAdd` in one kernel; fixed in Task 3, not this task).
 If any other test fails, that's a real regression — investigate before continuing.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add core/translation_rules.py frontends/source/cuda_frontend.py \
@@ -584,7 +584,7 @@ hits repo-wide). The current `ripple_sad` macro (`__builtin_abs(x-y)+z`) is vali
 portable C that doesn't depend on Ripple at all — the problem is only the misleading
 `ripple_`-prefixed name, which implies a real API symbol. Renaming, not removing.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Replace `tests/test_complex_kernels.py:333-349` (`test_sad_computation`) with two tests:
 
@@ -625,13 +625,13 @@ Replace `tests/test_complex_kernels.py:333-349` (`test_sad_computation`) with tw
             translate_cuda_source(cuda_code)
 ```
 
-- [ ] **Step 2: Run tests to verify the rename test fails**
+- [x] **Step 2: Run tests to verify the rename test fails**
 
 Run: `venv/bin/python -m pytest tests/test_complex_kernels.py::TestImageProcessing::test_sad_rename tests/test_complex_kernels.py::TestImageProcessing::test_sad_with_bare_atomic_add_fails -v`
 Expected: `test_sad_rename` FAILs (`cripple_sad(` not in result — it's still `ripple_sad`).
 `test_sad_with_bare_atomic_add_fails` should already PASS (Task 2 made this hard-fail).
 
-- [ ] **Step 3: Rename the macro**
+- [x] **Step 3: Rename the macro**
 
 In `core/translation_rules.py:1667`, in `MathFunctionRule.MATH_MAP`, change:
 
@@ -660,19 +660,19 @@ to:
 #define cripple_sad(x, y, z) (__builtin_abs((x) - (y)) + (z))
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `venv/bin/python -m pytest tests/test_complex_kernels.py::TestImageProcessing -v`
 Expected: PASS (all 5 tests in this class, including the two from Task 2 and the two from this task).
 
-- [ ] **Step 5: Run the full test suite to check for regressions**
+- [x] **Step 5: Run the full test suite to check for regressions**
 
 Run: `venv/bin/python -m pytest -v`
 Expected: All pass except `test_2d_convolution`, which fails starting in Task 4 (not yet
 reached) — if it already fails here, something is wrong; stop and investigate before
 continuing.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add core/translation_rules.py frontends/source/cuda_frontend.py \
@@ -720,7 +720,7 @@ the kernel would need rewriting to flat pointer arithmetic — an AST-level tran
 regex substitution can't do safely. Multi-dimensional `__shared__` arrays must hard-fail
 instead.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Replace `tests/test_translation.py:120-128` (`test_shared_memory_rule`):
 
@@ -826,7 +826,7 @@ through nested control flow, via the full pipeline:
         assert result.index("for (") < result.index("vtcm_free(sdata)")
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestTranslationRules::test_shared_memory_rule tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_multidim_hard_fails tests/test_complex_kernels.py::TestConvolutionKernels -v`
 Expected: FAIL — `test_shared_memory_rule` (old attribute output, no vtcm_malloc);
@@ -836,7 +836,7 @@ such function/assertions met yet). `test_2d_convolution` should already PASS as 
 (it no longer touches shared memory) — if it fails, the kernel rewrite has a bug; fix
 before continuing.
 
-- [ ] **Step 3: Rewrite `SharedMemoryRule`**
+- [x] **Step 3: Rewrite `SharedMemoryRule`**
 
 Replace `core/translation_rules.py:163-199` (the entire `SharedMemoryRule` class) with:
 
@@ -949,7 +949,7 @@ class SharedMemoryRule(TranslationRule):
         return result
 ```
 
-- [ ] **Step 4: Update the syntax-check stub header**
+- [x] **Step 4: Update the syntax-check stub header**
 
 In `tests/stub_headers/ripple.h`, add before the closing `#endif` (currently line 46):
 
@@ -962,17 +962,17 @@ void *vtcm_malloc(size_t size, size_t align_as);
 void vtcm_free(void *ptr);
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestTranslationRules::test_shared_memory_rule tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_multidim_hard_fails tests/test_complex_kernels.py::TestConvolutionKernels -v`
 Expected: PASS
 
-- [ ] **Step 6: Run the full test suite to check for regressions**
+- [x] **Step 6: Run the full test suite to check for regressions**
 
 Run: `venv/bin/python -m pytest -v`
 Expected: All pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add core/translation_rules.py tests/test_translation.py \
@@ -999,7 +999,7 @@ dedicated 2D-shared-memory coverage now lives in
 test_shared_memory_rule_multidim_hard_fails."
 ```
 
-- [ ] **Step 8 (optional but recommended — matches existing repo convention):**
+- [x] **Step 8 (optional but recommended — matches existing repo convention):**
 Open a tracking issue for the multi-dimensional VTCM gap, the same way issue #11 tracks
 the unsupported runtime-variable shuffle case:
 
@@ -1042,7 +1042,7 @@ where real kernels routinely contain comments and string-free but brace-containi
 constructs; a blanket bail-out on any comment in range would hard-fail legitimate,
 currently-passing kernels, which is a worse regression than the documented limitation).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the `TestTranslationRules` class in `tests/test_translation.py` (near the other
 `test_shared_memory_rule*` tests):
@@ -1069,13 +1069,13 @@ Add to the `TestTranslationRules` class in `tests/test_translation.py` (near the
         assert "sdata" in ctx.errors[0]
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_early_return_hard_fails -v`
 Expected: FAIL — no error is recorded today; the rule currently emits `vtcm_free(sdata);`
 right before the final `}`, leaking on the `return` path instead of hard-failing.
 
-- [ ] **Step 3: Add the return-path check**
+- [x] **Step 3: Add the return-path check**
 
 In `core/translation_rules.py`, in `SharedMemoryRule`, add a class-level pattern next to
 `EXTRA_DIM_PATTERN`:
@@ -1139,12 +1139,12 @@ Replace with:
         """
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestTranslationRules::test_shared_memory_rule_early_return_hard_fails -v`
 Expected: PASS
 
-- [ ] **Step 5: Run the full test suite to check for regressions**
+- [x] **Step 5: Run the full test suite to check for regressions**
 
 Run: `venv/bin/python -m pytest -v`
 Expected: All tests pass, 0 failures. (145 before this task; +1 new test.) If any
@@ -1155,7 +1155,7 @@ that fixture needs the same kind of fix `test_tiled_matmul` got in Task 4 (restr
 avoid the leak pattern, or accept the hard-fail as correct and adjust the test's
 expectation) rather than weakening the new check.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add core/translation_rules.py tests/test_translation.py
@@ -1196,7 +1196,7 @@ user-facing HTML page (`interfaces/web/server.py` — not the root `server.py`, 
 minimal JSON API with no copy to update, and not the Flutter app, which has no
 help/instructions surface today).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the `TestBoilerplateGeneration` class in `tests/test_translation.py` (created in
 Task 1):
@@ -1210,12 +1210,12 @@ Task 1):
         assert "-fenable-ripple" in result
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestBoilerplateGeneration::test_compile_flag_documented_in_output -v`
 Expected: FAIL
 
-- [ ] **Step 3: Add the note to the generated header comment**
+- [x] **Step 3: Add the note to the generated header comment**
 
 In `frontends/source/cuda_frontend.py`, replace lines 565-575:
 
@@ -1246,12 +1246,12 @@ with:
 """
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestBoilerplateGeneration::test_compile_flag_documented_in_output -v`
 Expected: PASS
 
-- [ ] **Step 5: Add the note to README.md**
+- [x] **Step 5: Add the note to README.md**
 
 In `README.md`, insert the following new blockquote immediately after the `### Command
 Line` code block (after the closing ` ``` ` that follows `cuda2ripple interactive`, before
@@ -1266,7 +1266,7 @@ the `### Web Interface` heading):
 > valid RIPPLE C.
 ```
 
-- [ ] **Step 6: Add the note to the CLI epilog**
+- [x] **Step 6: Add the note to the CLI epilog**
 
 In `interfaces/cli/cuda2ripple.py`, replace lines 387-395:
 
@@ -1297,7 +1297,7 @@ Ripple support is not enabled by default.
         """
 ```
 
-- [ ] **Step 7: Add the note to the web UI status bar**
+- [x] **Step 7: Add the note to the web UI status bar**
 
 In `interfaces/web/server.py`, find the status bar `<span>` (in `HTML_TEMPLATE`):
 
@@ -1315,12 +1315,12 @@ Replace with:
         </div>
 ```
 
-- [ ] **Step 8: Run the full test suite to check for regressions**
+- [x] **Step 8: Run the full test suite to check for regressions**
 
 Run: `venv/bin/python -m pytest -v`
 Expected: All pass.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add README.md interfaces/cli/cuda2ripple.py frontends/source/cuda_frontend.py \
@@ -1357,7 +1357,7 @@ translating to `__attribute__((section(".vtcm"))) T arr[N]` (Task 4 makes this f
 — it's `vtcm_malloc`/`vtcm_free` now). Fixing this here, after Tasks 2-5 have all landed,
 avoids editing these files twice.
 
-- [ ] **Step 1: Fix the translation-mapping tables and worked example**
+- [x] **Step 1: Fix the translation-mapping tables and worked example**
 
 In `README.md`, replace these two table rows (in the "Translation Mappings" section):
 
@@ -1438,7 +1438,7 @@ with:
 | `atomicAdd()` | *(no equivalent)* | Ripple has no atomics API — see the barrier + per-lane partial-sum pattern in the Ripple multi-threading guide |
 ```
 
-- [ ] **Step 2: Fix two stale test comments**
+- [x] **Step 2: Fix two stale test comments**
 
 In `tests/test_translation.py`, around line 1370, replace this comment (keep the
 assertions below it unchanged — only the comment text is stale):
@@ -1487,13 +1487,13 @@ with:
     # still the better check on its own merits.)
 ```
 
-- [ ] **Step 3: Run the full test suite to confirm no regressions**
+- [x] **Step 3: Run the full test suite to confirm no regressions**
 
 Run: `venv/bin/python -m pytest -v`
 Expected: All tests pass, 0 failures, 0 errors (same count as after Task 5 — this step
 only touched docs and comments, no behavior).
 
-- [ ] **Step 4: Commit the documentation cleanup**
+- [x] **Step 4: Commit the documentation cleanup**
 
 ```bash
 git add README.md docs/README.md docs/ARCHITECTURE.md tests/test_translation.py
@@ -1508,12 +1508,12 @@ behavior, and fixed two test comments in test_translation.py that
 cited since-removed fallback macros as their rationale."
 ```
 
-- [ ] **Step 5: Run the full test suite**
+- [x] **Step 5: Run the full test suite**
 
 Run: `venv/bin/python -m pytest -v`
 Expected: All tests pass, 0 failures, 0 errors.
 
-- [ ] **Step 6: Verify a real, previously-broken kernel now hard-fails correctly**
+- [x] **Step 6: Verify a real, previously-broken kernel now hard-fails correctly**
 
 ```bash
 venv/bin/python server.py > /tmp/cripple_verify_server.log 2>&1 &
@@ -1534,7 +1534,7 @@ reduction idiom — check the response for `ripple_reduceadd`; if present, this 
 correct pass, not a bug. Either a hard-fail or a `ripple_reduceadd` translation is
 correct here; a bare `ripple_atomic_add` in the output is not.)*
 
-- [ ] **Step 7: Verify a real kernel using VTCM now compiles**
+- [x] **Step 7: Verify a real kernel using VTCM now compiles**
 
 ```bash
 curl -s http://127.0.0.1:5001/translate -X POST -H "Content-Type: application/json" \
@@ -1545,7 +1545,7 @@ curl -s http://127.0.0.1:5001/translate -X POST -H "Content-Type: application/js
 Expected: a JSON `translated` response containing `vtcm_malloc`, `vtcm_free`, and
 `#define HVX_PE 0`, and NOT containing `__attribute__((section(".vtcm")))`.
 
-- [ ] **Step 8: Verify the translated output actually syntax-checks**
+- [x] **Step 8: Verify the translated output actually syntax-checks**
 
 Save the `translated` field from Step 3 to a file and run it through the same check
 `tests/compile_verify.py` uses:
@@ -1568,13 +1568,13 @@ instead of through `python3 -m json.tool`.)
 
 Expected: exit code `0`, no output (clean syntax check against the updated stub header).
 
-- [ ] **Step 9: Stop the server**
+- [x] **Step 9: Stop the server**
 
 ```bash
 pkill -f "venv/bin/python server.py"
 ```
 
-- [ ] **Step 10: Final commit (only if Steps 5-8 needed any fixes)**
+- [x] **Step 10: Final commit (only if Steps 5-8 needed any fixes)**
 
 Step 4 already committed the documentation cleanup. If the verification steps (5-8)
 passed cleanly with no further fixes needed, no additional commit is needed here. If
