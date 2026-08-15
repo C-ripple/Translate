@@ -13,6 +13,18 @@
 > pointer and instead say plainly that no documented Ripple alternative exists. Treat
 > every `f"... multi-threading guide."` string in this document's code blocks as
 > superseded by that correction, not as current shipped text.
+>
+> **Second correction (same audit pass):** Task 2's "trailing atomicAdd" reasoning
+> (around line 423 and its Step 6a rationale) wrongly claims `block_idx_x` "is never
+> declared or assigned anywhere in the generated output." It is: `GlobalKernelRule`
+> always adds it as a real `int` function parameter. The hard-fail decision is still
+> correct — Ripple has no native multi-block construct in this release
+> (`release-notes.md`: only one SIMD PE type is supported), so the generated per-block
+> function is meant to be invoked once per grid block by an external, hand-written C
+> driver loop this translator never sees or generates, and there's no way to know from
+> inside the translator whether that external loop makes a trailing write race-free —
+> but the "undefined identifier" framing was factually wrong. See the design spec's
+> addendum for the corrected reasoning.
 
 **Goal:** Make C-Ripple's source-level translator (`frontends/source/cuda_frontend.py` +
 `core/translation_rules.py`) emit only real Ripple 21.0-alpha3 API calls, so Benoit's
