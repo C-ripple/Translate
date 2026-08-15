@@ -566,7 +566,12 @@ class CUDAToRIPPLETransformer:
  * Auto-generated RIPPLE code from CUDA source
  * Target: Hexagon HVX ({self.hexagon_config.hvx_mode})
  * Vector width: {self.hexagon_config.hvx_width} bytes
- * 
+ *
+ * Compile with: clang -fenable-ripple ... — Ripple support is not
+ * enabled by default; omitting this flag produces undefined-symbol
+ * errors for every ripple_* call in this file even though the code
+ * below is valid RIPPLE C.
+ *
  * Translation warnings:
 """
         for warning in self.ctx.warnings:

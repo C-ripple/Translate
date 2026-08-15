@@ -1682,6 +1682,13 @@ class TestBoilerplateGeneration:
         result = translate_cuda_source(cuda_code)
         assert "#define HVX_PE 0" in result
 
+    def test_compile_flag_documented_in_output(self):
+        """Generated output must tell the reader how to actually compile
+        it — -fenable-ripple is required and easy to miss."""
+        cuda_code = "__global__ void k(float *a) { a[0] = 1.0f; }"
+        result = translate_cuda_source(cuda_code)
+        assert "-fenable-ripple" in result
+
 
 # =============================================================================
 # Run Tests

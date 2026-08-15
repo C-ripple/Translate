@@ -392,6 +392,9 @@ Examples:
   cuda2ripple analyze kernel.cu --json
   cuda2ripple batch *.cu -o output/
   cuda2ripple interactive
+
+Note: compile translated output with `clang -fenable-ripple ...` —
+Ripple support is not enabled by default.
         """
     )
     

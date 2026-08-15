@@ -75,6 +75,13 @@ cuda2ripple batch *.cu -o output/
 cuda2ripple interactive
 ```
 
+> **Compiling the output:** Ripple support isn't enabled by default in a
+> Ripple-capable clang build — compile translated output with
+> `clang -fenable-ripple ...` (see the Ripple Troubleshooting Guide's
+> "Missing ripple\_\* symbols" section). Without this flag, translated
+> code fails to compile with undefined-symbol errors even though it's
+> valid RIPPLE C.
+
 ### Web Interface
 
 ```bash

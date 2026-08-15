@@ -377,7 +377,7 @@ __global__ void reduce_sum(float *input, float *output, int n) {
             <span id="status-text">Ready</span>
         </div>
         <div class="status-item">
-            <span>Target: Hexagon HVX v68 | Vector: 128 bytes | RIPPLE v0.1</span>
+            <span>Target: Hexagon HVX v68 | Vector: 128 bytes | RIPPLE v0.1 | Compile with: clang -fenable-ripple ...</span>
         </div>
     </div>
 
