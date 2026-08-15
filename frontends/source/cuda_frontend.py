@@ -586,6 +586,12 @@ class CUDAToRIPPLETransformer:
 
 /* Block shape configuration */
 #define HVX_VECTOR_SIZE {self.hexagon_config.hvx_width}
+
+/* Ripple's pe_id argument is unused on Hexagon today (release notes: only
+ * one SIMD PE type is supported), but <ripple.h> does not define a
+ * constant for it — every example in the Ripple docs self-defines its own
+ * PE constant instead of relying on the header. Do the same. */
+#define HVX_PE 0
 #define RIPPLE_BLOCK_DIM_X {block_shape.dimensions[0]}
 #define RIPPLE_BLOCK_DIM_Y {block_shape.dimensions[1] if len(block_shape.dimensions) > 1 else 1}
 #define RIPPLE_BLOCK_DIM_Z {block_shape.dimensions[2] if len(block_shape.dimensions) > 2 else 1}

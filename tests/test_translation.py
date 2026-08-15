@@ -1623,6 +1623,19 @@ __global__ void softmax(float *input, float *output, int n) {
     assert "ripple_reducemax(0b1, local_max)" in result
 
 
+class TestBoilerplateGeneration:
+    """Tests for the RIPPLE boilerplate CUDAToRIPPLETransformer emits around
+    translated kernels."""
+
+    def test_hvx_pe_self_defined(self):
+        """HVX_PE must be defined by the generated output itself, not assumed
+        to come from <ripple.h> — no example in the Ripple docs relies on the
+        header for its PE constant."""
+        cuda_code = "__global__ void k(float *a) { a[0] = 1.0f; }"
+        result = translate_cuda_source(cuda_code)
+        assert "#define HVX_PE 0" in result
+
+
 # =============================================================================
 # Run Tests
 # =============================================================================
