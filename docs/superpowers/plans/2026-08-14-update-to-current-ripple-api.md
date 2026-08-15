@@ -385,17 +385,165 @@ functions (`ripple_atomic_add` etc.) that were never real Ripple API.
 Run: `venv/bin/python -m pytest tests/test_translation.py::TestTranslationRules::test_atomic_add_rule tests/test_complex_kernels.py::TestAtomicOperations -v`
 Expected: PASS
 
-- [ ] **Step 6: Run the full test suite to check for regressions**
+- [ ] **Step 6: Run the full test suite — expect 5 failures, diagnose each**
 
 Run: `venv/bin/python -m pytest -v`
-Expected: All pass. (`test_sad_computation` in `test_complex_kernels.py` will now fail —
-it combines `__sad` with a bare `atomicAdd`; this is expected and fixed in Task 3.)
+
+Expected failures (found during implementation — the "reduction idiom already handles
+the common case" reasoning above is narrower than it sounds):
+1. `tests/test_complex_kernels.py::TestReductionKernels::test_warp_reduction_optimization`
+2. `tests/test_complex_kernels.py::TestImageProcessing::test_sad_computation` (unrelated —
+   fixed in Task 3, ignore for now)
+3. `tests/test_real_kernels.py::test_translates_without_error[atomics_cas_exch.cu]`
+4. `tests/test_real_kernels.py::test_translates_without_error[cuda_kernels.cu]`
+5. `tests/test_real_kernels.py::test_translated_output_is_valid_syntax[atomics_cas_exch.cu]`
+
+`WarpReductionRule` only rewrites the shuffle loop itself
+(`val = ripple_reduceadd(0b1, val);`) — it does not consume a trailing
+`if (tid == 0) { atomicAdd(output, val); }` statement, which is the standard way a
+warp's fully-reduced value gets written into a shared/global accumulator. That call now
+correctly hard-fails: real Ripple has no atomics, and there's no way to know whether a
+plain (non-atomic) write would be safe instead, because this translator doesn't actually
+model CUDA's multi-block grid execution yet — `restructure_kernel()` (the function that
+would turn `blockIdx`-driven grids into an explicit loop) is dead code, never called
+anywhere (verify: `grep -rn "restructure_kernel" --include="*.py" .` finds only its own
+`def`), and `BlockIdxRule` today just substitutes `blockIdx.x` for the bare identifier
+`block_idx_x`, which is never declared or assigned anywhere in the generated output — a
+pre-existing, unrelated bug confirming multi-block execution isn't modeled. A kernel that
+really does launch many blocks needs a genuine cross-block accumulation primitive; one
+that launches a single block doesn't need atomicity at all — the translator has no way
+to tell which case it's looking at, so hard-failing is the only honest option.
+
+- [ ] **Step 6a: Fix `test_warp_reduction_optimization`**
+
+In `tests/test_complex_kernels.py`, add `CUDAToRIPPLETransformer` to the existing import
+(alongside `translate_cuda_source`):
+
+```python
+from frontends.source.cuda_frontend import translate_cuda_source, CUDAToRIPPLETransformer
+```
+
+Replace the `test_warp_reduction_optimization` method (in `TestReductionKernels`):
+
+```python
+    def test_warp_reduction_optimization(self):
+        """Warp reduction loops are optimized to ripple_reduceadd, but a
+        subsequent single-thread atomicAdd (writing the already-reduced
+        value into global memory) correctly hard-fails — Ripple has no
+        atomics API, and this translator doesn't yet model CUDA's
+        multi-block grid execution, so there's no safe way to know whether
+        a plain (non-atomic) write would be correct here."""
+        cuda_code = """
+        __global__ void reduce_sum(float *input, float *output, int N) {
+            int tid = threadIdx.x;
+            int idx = blockIdx.x * blockDim.x + tid;
+
+            float val = (idx < N) ? input[idx] : 0.0f;
+
+            // Warp reduction
+            for (int offset = warpSize/2; offset > 0; offset /= 2) {
+                val += __shfl_down_sync(0xffffffff, val, offset);
+            }
+
+            if (tid == 0) {
+                atomicAdd(output, val);
+            }
+        }
+        """
+
+        ctx = TranslationContext()
+        transformer = CUDAToRIPPLETransformer(ctx)
+        with pytest.raises(TranslationError):
+            transformer.transform(cuda_code)
+
+        # The shuffle loop itself is still correctly recognized — only the
+        # trailing atomicAdd (no Ripple equivalent) is the hard-fail.
+        assert any("Warp Reduction" in w for w in ctx.warnings)
+        assert any("atomicAdd" in e for e in ctx.errors)
+```
+
+Run: `venv/bin/python -m pytest tests/test_complex_kernels.py::TestReductionKernels::test_warp_reduction_optimization -v`
+Expected: PASS
+
+- [ ] **Step 6b: Fix the `atomics_cas_exch.cu` fixture tests**
+
+In `tests/test_real_kernels.py`, add `TranslationError` to the imports:
+
+```python
+from core.semantic_model import TranslationError
+```
+
+Remove `"atomics_cas_exch.cu"` from both the `KERNEL_FILES` and `SYNTAX_CHECK_PARAMS`
+lists (it stays as a file in `tests/examples/`, just no longer run through the two
+generic "translates successfully" parametrized tests). Then add a new dedicated test
+after `test_translated_output_is_valid_syntax`:
+
+```python
+def test_atomics_cas_exch_hard_fails():
+    """atomicCAS/atomicExch have no Ripple equivalent — this fixture's sole
+    purpose (both calls, no other content) now exercises the hard-fail
+    path rather than translation."""
+    source = (EXAMPLES_DIR / "atomics_cas_exch.cu").read_text()
+    with pytest.raises(TranslationError):
+        translate_cuda_source(source)
+```
+
+Run: `venv/bin/python -m pytest tests/test_real_kernels.py -v -k "atomics_cas_exch or not cu"`
+Expected: no test collected for `atomics_cas_exch.cu` under the two generic tests; the
+new `test_atomics_cas_exch_hard_fails` passes.
+
+- [ ] **Step 6c: Fix the `cuda_kernels.cu` fixture test and its stale docstring**
+
+`cuda_kernels.cu` is a 10-kernel fixture with 5 unrelated atomic call sites (lines 116,
+129, 199, 254, 268 — none are the recognized single-block reduction idiom). It's already
+excluded from `SYNTAX_CHECK_PARAMS` (a large module docstring at the top of
+`tests/test_real_kernels.py` explains several pre-existing, unrelated reasons why — do
+not touch that exclusion or that docstring's other content). It IS in `KERNEL_FILES`,
+whose `test_translates_without_error` asserted successful translation — that assertion
+is now wrong for this file specifically.
+
+Remove `"cuda_kernels.cu"` from `KERNEL_FILES`. Add a dedicated replacement test after
+`test_translates_without_error`:
+
+```python
+def test_cuda_kernels_file_hard_fails_on_atomics():
+    """cuda_kernels.cu (see module docstring above) mixes many patterns in
+    one file, including 5 atomicAdd/atomicMax call sites that aren't the
+    recognized single-block reduction idiom. The whole file now correctly
+    hard-fails rather than silently mistranslating them.
+    CUDAToRIPPLETransformer.transform() accumulates every rule's errors
+    before raising (it doesn't stop at the first), so a real translation
+    bug in one of this file's other, unrelated kernels — the shuffle loops
+    and math intrinsics this file also exercises — would still show up as
+    an additional, distinguishable error here rather than being masked."""
+    source = (EXAMPLES_DIR / "cuda_kernels.cu").read_text()
+    with pytest.raises(TranslationError) as exc_info:
+        translate_cuda_source(source)
+
+    assert len(exc_info.value.errors) >= 5
+```
+
+Then update the module docstring's claim about this file (currently says it "now
+translates successfully and is covered here structurally" — find that exact sentence
+near the top of the file and correct it to reflect the new hard-fail behavior, keeping
+the rest of the surrounding paragraph about `WarpMinMaxReductionRule` intact, since that
+part is still true and unrelated to this change).
+
+Run: `venv/bin/python -m pytest tests/test_real_kernels.py::test_cuda_kernels_file_hard_fails_on_atomics -v`
+Expected: PASS
+
+- [ ] **Step 6d: Run the full test suite again to confirm only the expected failure remains**
+
+Run: `venv/bin/python -m pytest -v`
+Expected: All pass except `test_sad_computation` in `tests/test_complex_kernels.py` (it
+combines `__sad` with a bare `atomicAdd` in one kernel; fixed in Task 3, not this task).
+If any other test fails, that's a real regression — investigate before continuing.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add core/translation_rules.py frontends/source/cuda_frontend.py \
-        tests/test_translation.py tests/test_complex_kernels.py
+        tests/test_translation.py tests/test_complex_kernels.py tests/test_real_kernels.py
 git commit -m "Hard-fail atomics instead of translating to fictional ripple_atomic_* calls
 
 Ripple has no atomics API — confirmed via direct read of
@@ -408,7 +556,16 @@ the higher-priority reduction-idiom rules (WarpReductionRule etc.,
 priority 84-86 vs this rule's 60) didn't already translate the call.
 
 Also removes the fake ripple_atomic_* macro #defines from generated
-output's boilerplate header, since nothing calls them anymore."
+output's boilerplate header, since nothing calls them anymore.
+
+This turned out broader than originally scoped: WarpReductionRule only
+rewrites the shuffle loop, not a trailing single-thread atomicAdd that
+writes the reduced value out — that call now hard-fails too, correctly,
+since this translator doesn't model CUDA's multi-block grid execution
+(restructure_kernel() is dead code; blockIdx.x becomes an undefined
+dangling identifier today). Updated test_warp_reduction_optimization
+and two tests/test_real_kernels.py fixtures (atomics_cas_exch.cu,
+cuda_kernels.cu) that encoded the old fictional-atomics behavior."
 ```
 
 *(Expected test failure after this commit, fixed in the next task: `test_sad_computation`.)*
