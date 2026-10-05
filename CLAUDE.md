@@ -16,11 +16,25 @@ worktree (a worktree only gets tracked files).
 subagent report — without spot-checking it directly against this directory first.** A
 research subagent's report was trusted once without re-verifying one specific citation
 (`temp_ripple_docs/src/ripple-spec/multi-threading.md` and an entire `ripple_thd_*`
-multicore/thread API family), and it was fabricated — neither the file nor the API
-family exists anywhere in the actual docs (confirmed: zero hits for "atomic" or
-"thd"/"thread" across the whole corpus). It shipped in merged, pushed error messages
-before being caught and corrected. The lesson: a well-formatted, heavily-cited report is
-not evidence of accuracy — grep the actual files.
+multicore/thread API family). At the time (checkout `0dc48ff`, through 2026-07-10),
+neither the file nor the API family existed anywhere in the actual docs. It shipped in
+merged, pushed error messages before being caught and corrected. The lesson stands even
+though the underlying fact has since changed (see below): a well-formatted, heavily-cited
+report is not evidence of accuracy — grep the actual files, every time, even when a claim
+matches something you remember rejecting before.
+
+**Update, 2026-08-17: `multi-threading.md` and the `ripple_thd_*` API are now real.**
+Qualcomm published the doc upstream that morning; pulling `temp_ripple_docs/` to
+`ef517bf` confirms `src/ripple-spec/multi-threading.md` now exists (769 lines, added in
+that commit) and `src/SUMMARY.md` now links it. Benoit Meister (Ripple's creator)
+confirmed directly that Hexagon-side multi-threading via `ripple_thd_*` is landing in
+"the top-of-tree version" next week, with QuRT/QHPI runtime support "in an upcoming
+release" after that — i.e. **documented but not yet in the 21.0-alpha3 release this
+translator currently targets**. Confirmed independently: `release-notes.md` at the same
+commit is unchanged and still says 21.0-alpha3 has no native multicore construct and
+suggests OpenMP for thread-level parallelism — the release notes haven't caught up to
+the spec doc yet, consistent with "top-of-tree, not released." See
+`ripple_thd_*` API details below.
 
 ## Ripple 21.0-alpha3 — real capabilities and limits (independently verified)
 
@@ -31,10 +45,12 @@ not evidence of accuracy — grep the actual files.
   automatic translation path today.
 - **Only one SIMD PE type is supported this release** — `release-notes.md`: "Ripple
   only supports a machine with one type of SIMD processing elements... the PE id
-  argument is unused." There is no native multicore/multi-block construct.
+  argument is unused." There is no native SIMD multicore/multi-block construct.
   `vs-cuda.md`'s `blockIdx.x → ripple_id(multicore_block, 0)` mapping is illustrative
   for a hypothetical future machine, not a usable API today — "multicore" appears
-  nowhere else in the entire docs corpus.
+  nowhere else in the entire docs corpus. (This is a distinct axis from the
+  `ripple_thd_*` *threading* API below — SIMD multicore still doesn't exist; CPU/DSP
+  multi-threading is what's newly documented.)
 - Requires `clang -fenable-ripple` to activate at all — omitting it produces
   undefined-symbol errors for every `ripple_*` call despite otherwise-valid code
   (`troubleshooting/src/generic-ts.md`).
@@ -49,6 +65,43 @@ not evidence of accuracy — grep the actual files.
 - Math functions (`sqrtf`, `expf`, etc.) need `<math.h>` (or `<ripple_math.h>` for
   vectorized/f16 variants) — not automatic.
 
+## `ripple_thd_*` — Hexagon multi-threading API (documented 2026-08-17, not yet released)
+
+Source: `temp_ripple_docs/src/ripple-spec/multi-threading.md` at `ef517bf`. Distinct
+prefix (`ripple_thd_`) from SIMD's `ripple_`. Key surface:
+- `ripple_thd_init(pe_id, underlying, n_blocks, flags, max_dims)` /
+  `ripple_thd_exit(underlying)` — bind a runtime object (QuRT's `qthd_runtime_t*` or
+  QHPI's `QHPI_RuntimeHandle*`) to Ripple.
+- `ripple_thd_set_block_shape(underlying, block_id, n_dims, size_t...shape)` →
+  `ripple_thd_block_t` — `RIPPLE_THD_DYNAMIC` in a dimension means "use all available
+  threads."
+- `ripple_thd_id(block, dim)`, `ripple_thd_get_block_size(block, dim)`,
+  `ripple_thd_barrier(block, dims_bitset)`, `ripple_thd_is_main(block, dims_bitset)`.
+- `ripple_thd_parallel(block, chunk_size, flags, dims...)` (static) /
+  `ripple_thd_parallel_dyn(...)` (dynamic, dimension 0 only) — loop-annotation sugar
+  over SPMD, analogous to `ripple_parallel` for SIMD. At most one dimension may be
+  dynamically scheduled, and it must be dimension 0.
+- QuRT adds `ripple_thd_call(block, func, args)` (fork-join) + `qthd_runtime_init/exit`.
+  QHPI has no equivalent entry-point call — the QHPI environment invokes the kernel
+  directly with a runtime handle.
+- Max 3 thread dimensions; max blocks is runtime-dependent (QuRT: 2, QHPI: 1).
+- Thread and SIMD annotations can combine on the same loop; thread annotation must
+  precede the SIMD one.
+- Still true: **no atomics API anywhere** — confirmed zero "atomic" hits in the full
+  corpus post-pull, including inside `multi-threading.md` itself, which explicitly
+  reduces without atomics via `ripple_thd_barrier` + per-thread scratch buffers (see its
+  `sum_along_dim1` example) rather than an atomic add.
+
+Benoit's own sketch of a per-CUDA-block HTP-side loop (to avoid host↔HTP round-trip
+latency) nests `ripple_thd_set_block_shape` once, then `blockIdx_z`/`blockIdx_y` loops,
+then `ripple_thd_parallel(...)` immediately before the `blockIdx_x` loop that holds the
+translated per-block body. Note his pasted snippet reuses `blockDim_x` as the bound for
+all three loops (`blockIdx_z`, `blockIdx_y`, `blockIdx_x`) — almost certainly a
+copy-paste typo for `blockDim_z`/`blockDim_y`/`blockDim_x` respectively; verify with him
+before treating it as the literal shape to emit. His guidance: since the QuRT/QHPI
+runtime isn't released yet, C-Ripple should skip emitting the `ripple_thd_parallel` call
+itself for now (leaving that loop sequential) rather than wait entirely.
+
 ## This translator's architecture (source-level path, `frontends/source/` + `core/`)
 
 `GlobalKernelRule` always adds `block_idx_x/y/z`, `grid_dim_x/y/z`, `block_dim_x/y/z` as
@@ -61,11 +114,20 @@ anywhere a user would see it today.
 
 ## Deferred / known gaps (intentionally out of scope so far, not forgotten)
 
-- **Host-side grid-loop auto-generation** — would let the translator emit the outer
-  per-block driver loop itself. A real architectural commitment (changes the output
-  contract from "self-contained program" to "expects a generated host wrapper"), scoped
-  out because there's no signal yet from Benoit's team that it's actually blocking them.
-  Revisit if that changes.
+- **~~Host-side~~ HTP-side grid-loop auto-generation — no longer deferred, Benoit gave
+  the signal on 2026-08-17.** Originally scoped out as "would let the translator emit
+  the outer per-block driver loop itself... no signal yet from Benoit's team that it's
+  actually blocking them." Benoit has now explicitly requested this, and redirected it
+  from a host-side loop to an HTP-side loop using the new `ripple_thd_*` API (to avoid
+  host↔HTP round-trip latency) — see the `ripple_thd_*` section above. This is a bigger
+  architectural change than the original host-loop idea would have been: it changes the
+  output contract (translator emits the block-iteration loop + thread-block setup
+  itself, using an API not yet in the release the translator otherwise targets) and its
+  correct shape depends on a currently-unreleased runtime. Needs a design spec
+  (`docs/superpowers/specs/`) before implementation, not a direct patch — open questions
+  include the loop-bound typo noted above, which of `ripple_thd_parallel`'s deferred
+  parts to stub vs. skip until QuRT/QHPI ship, and how `underlying`/`rt` (the runtime
+  object) gets threaded into a translator that currently emits self-contained kernels.
 - **VS Code extension** (`interfaces/vscode/`) duplicates the source-level translation
   logic independently in TypeScript, rather than calling into the Python translator —
   tracked as GitHub issue #9, deliberately deferred as "a separate, bigger decision."
