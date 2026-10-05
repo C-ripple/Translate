@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "qualification": "prototype_f32_transfer_subset_simulator_validated",
+  "rust": {
+    "channel": "nightly-2026-01-20",
+    "commit": "d940e56841ddcc05671ead99290e35ff2e98369f",
+    "llvm_version": "21.1.8",
+    "components": [
+      "rustc-dev",
+      "llvm-tools",
+      "rust-src",
+      "rustfmt",
+      "clippy"
+    ],
+    "kernel_target": "hexagon-unknown-none-elf",
+    "target_cpu": "hexagonv68",
+    "pointer_width": 32,
+    "kernel_profile": "release",
+    "panic": "abort",
+    "kernel_mir_opt_level": 0,
+    "dependency_mir_opt_level": "rustc release default; do not override globally",
+    "build_std": [
+      "core"
+    ],
+    "build_std_features": [
+      "compiler-builtins-mem"
+    ],
+    "marker_encoding": "foreign declaration with rustc_diagnostic_item ripple_lane_id_v1 in ripple-kernel",
+    "extraction": "after_analysis; explicitly query local mir_borrowck; instance_mir with concrete substitutions; no MIR text parsing"
+  },
+  "ripple_candidate": {
+    "repository": "https://github.com/qualcomm/ripple",
+    "release": "ripple_2025-12-19",
+    "commit": "3cc53350b1223fae796d460c108af3d9e3c96103",
+    "status": "validated_for_abi_v1_f32_transfer_subset_on_simulator",
+    "target": "hexagon-unknown-unknown-elf",
+    "cpu": "v68",
+    "hvx_bytes": 128,
+    "flags": [
+      "-fenable-ripple",
+      "-O2",
+      "-mv68",
+      "-mhvx",
+      "-mhvx-length=128B",
+      "-G0"
+    ],
+    "sdk_candidate": "6.5.0.0",
+    "linker_commit": null,
+    "runtime_version": "HEXAGON_Tools 19.0.07",
+    "sysroot": "artifacts/hexagon-sdk/target",
+    "image_digest": "sha256:9abf71ed364add97afc6418409c83db5677f2d27e1f132514c08ab1285970792",
+    "documentation_commit": "ef517bfff19627dcdc21645e3825b80220dc3c0e",
+    "source_archive_sha256": "a028f84f7072c2904199141514be948fe73609bc2c8cfc4cfd20e962c06e1f48",
+    "sdk_directory_sha256": "4b5bfaa88112d0b6e5396cd14b350c6aea5c698e9e90ef1933d2844a27f5991c",
+    "host_portability_patch": "scripts/build_ripple_host.py PORTABILITY_REPLACEMENTS (size_t callback indices on Darwin)",
+    "simulator_flags": [
+      "--mv68",
+      "--simulated_returnval"
+    ],
+    "small_data_policy": "-G0 with SDK G0 libraries and QCLD; native LLD was rejected by compatibility probes (GP relocations, then missing SDK startup symbols)",
+    "linker_version": "SDK QCLD 19.0.07 (LLVM 19.0); vendor source commit unavailable",
+    "linker_sha256": "6f77bef53cf00111188575a6e768ce5793df6284802e8ce3b2790429c285e399",
+    "linker_library_sha256": "4d91abd60728e472c3c3d68768a3e112cf93200641c054072390ab85a363cc2c",
+    "simulator_sha256": "b8b1fe6a1d5bf8c9bbc03444cb129bfc3c85f9474cb0952c3a385dda34a1503a",
+    "observed_simulator_model": "rev_id 0x00008d68 (v68n_1024)"
+  },
+  "abi": {
+    "version": 1,
+    "calling_convention": "C on Hexagon; generated C entry invoked by independent target C caller in passing simulator tests",
+    "shape": [
+      32
+    ],
+    "buffer_element": "f32",
+    "pointer_address_space": "target memory; no host pointer transport",
+    "launch_descriptor": [
+      "abi_version:u32",
+      "struct_bytes:u32",
+      "length:u32",
+      "block_offset:u32"
+    ],
+    "kernel_arguments": "src + block_offset, dst + block_offset, length - block_offset; local lane ID 0..31",
+    "buffer_contract": "128-byte alignment, valid initialized length elements, disjoint source and output, exclusive output writes"
+  },
+  "release_gate": "Real Ripple compilation, target C ABI invocation, and simulator/device execution are mandatory; missing tools are failures, not skips.",
+  "qualification_evidence": "artifacts/target-suite.json plus per-case reports; physical hardware, broader Rust features, and performance remain unqualified"
+}

@@ -1,0 +1,9 @@
+[package]
+name = "ripple-kernel"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(ripple_frontend)"] }
