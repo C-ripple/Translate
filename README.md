@@ -2,6 +2,9 @@
 
 A comprehensive toolchain for translating CUDA code to [RIPPLE](https://discourse.llvm.org/t/rfc-ripple-a-compiler-interpreted-api-to-support-spmd-and-loop-annotation-programming-for-simd-targets/88241) for Hexagon HVX and other SIMD targets.
 
+The independent Rust frontend now lives in [rust-to-ripple](https://github.com/aseesy/rust-to-ripple).
+This repository contains the CUDA translator and its Ripple threading notes.
+
 ## Overview
 
 This translator enables porting existing CUDA codebases to non-GPU SIMD hardware, specifically targeting Qualcomm's Hexagon processor with HVX (Hexagon Vector eXtensions).
