@@ -78,6 +78,29 @@ def print_banner():
 # CLI Commands
 # =============================================================================
 
+def parse_block_shape_options(specs):
+    """Accept a common shape or repeated KERNEL=X,Y,Z specifications."""
+    if not specs:
+        return None
+    shapes = {}
+    for spec in specs:
+        kernel, separator, dimensions = spec.partition("=")
+        if not separator:
+            if len(specs) != 1:
+                raise ValueError("Use either one common --block-shape or named shapes for every option")
+            dimensions = kernel
+        try:
+            shape = tuple(int(d.strip()) for d in dimensions.split(","))
+        except ValueError:
+            raise ValueError("Block shape must contain positive integer extents") from None
+        if not separator:
+            return shape
+        if not kernel or kernel in shapes:
+            raise ValueError("Block shape kernel names must be nonempty and unique")
+        shapes[kernel] = shape
+    return shapes
+
+
 def cmd_source(args):
     """Handle source-level translation."""
     print_colored(f"[Source Translation] {args.input}", Colors.GREEN)
@@ -103,7 +126,9 @@ def cmd_source(args):
             cuda_source = f.read()
         
         # Transform
-        transformer = CUDAToRIPPLETransformer(ctx)
+        transformer = CUDAToRIPPLETransformer(
+            ctx, block_shape=parse_block_shape_options(getattr(args, 'block_shape', None)),
+            threaded=getattr(args, 'threaded', False))
         ripple_source = transformer.transform(cuda_source)
         
         # Output
@@ -268,7 +293,9 @@ def cmd_batch(args):
             # cmd_interactive's 'file' handler already fixed — see its
             # comment below.
             ctx = TranslationContext(target_platform=args.target)
-            transformer = CUDAToRIPPLETransformer(ctx)
+            transformer = CUDAToRIPPLETransformer(
+                ctx, block_shape=parse_block_shape_options(getattr(args, 'block_shape', None)),
+                threaded=getattr(args, 'threaded', False))
             ripple_source = transformer.transform(cuda_source)
             
             with open(output_path, 'w') as f:
@@ -395,6 +422,7 @@ Examples:
 
 Note: compile translated output with `clang -fenable-ripple ...` —
 Ripple support is not enabled by default.
+For v68 IEEE float arithmetic, also use -mno-hvx-qfloat -mhvx-ieee-fp.
         """
     )
     
@@ -408,6 +436,11 @@ Ripple support is not enabled by default.
     source_parser = subparsers.add_parser('source', help='Source-level translation')
     source_parser.add_argument('input', help='Input CUDA source file')
     source_parser.add_argument('-o', '--output', help='Output file')
+    source_parser.add_argument('--threaded', action='store_true',
+                               help='Also generate a launcher accepting a runtime Ripple thread block')
+    source_parser.add_argument('--block-shape', action='append', metavar='[KERNEL=]X,Y,Z',
+                               help='Original static CUDA block shape; repeat named options for multiple kernels. '
+                                    'Omit to require a caller-supplied SIMD block.')
     source_parser.add_argument('--target', default='hexagon',
                                choices=['hexagon', 'x86', 'arm'],
                                help='Target platform')
@@ -440,6 +473,11 @@ Ripple support is not enabled by default.
     batch_parser.add_argument('inputs', nargs='+', help='Input files')
     batch_parser.add_argument('-o', '--output', required=True,
                               help='Output directory')
+    batch_parser.add_argument('--threaded', action='store_true',
+                               help='Also generate a launcher accepting a runtime Ripple thread block')
+    batch_parser.add_argument('--block-shape', action='append', metavar='[KERNEL=]X,Y,Z',
+                               help='Original static CUDA block shape; repeat named options for multiple kernels. '
+                                    'Omit to require a caller-supplied SIMD block.')
     batch_parser.add_argument('--target', default='hexagon',
                               choices=['hexagon', 'x86', 'arm'],
                               help='Target platform')

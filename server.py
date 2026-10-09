@@ -11,7 +11,7 @@ try:
 except ImportError as e:
     print(f"Error importing translation module: {e}")
     # Fallback for dev/testing if modules aren't fully set up
-    def translate_cuda_source(source, target="hexagon"):
+    def translate_cuda_source(source, target="hexagon", block_shape=None, threaded=False):
         return f"// Error: Could not import translator.\n// {str(e)}\n\n// Mock output:\n" + source.replace("__global__", "kernel")
 
 app = Flask(__name__)
@@ -26,7 +26,9 @@ def translate():
     source_code = data['source']
     try:
         # Perform the translation
-        translated_code = translate_cuda_source(source_code, target="hexagon")
+        translated_code = translate_cuda_source(
+            source_code, target="hexagon", block_shape=data.get("block_shape"),
+            threaded=data.get("threaded", False))
         return jsonify({'translated': translated_code})
     except Exception as e:
         return jsonify({'error': str(e)}), 500

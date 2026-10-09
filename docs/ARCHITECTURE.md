@@ -169,9 +169,9 @@ CUDA LLVM IR (.ll)
 | CUDA | RIPPLE | Notes |
 |------|--------|-------|
 | `threadIdx.x` | `ripple_id(block, 0)` | Lane index in SIMD vector |
-| `blockDim.x` | `ripple_get_block_size(block, 0)` | Vector width |
-| `blockIdx.x` | Loop variable `block_idx_x` | Grid parallelism → loops |
-| `__global__` | Regular function + `ripple_set_block_shape()` | |
+| `blockDim.x` | `ripple_get_block_size(block, 0)` | Original logical CUDA block extent |
+| `blockIdx.x` | Launch context alias `block_idx_x` | Sequential grid loops or cyclic runtime-worker assignment |
+| `__global__` | Per-block function + grid launcher | Explicit static SIMD shape or caller-supplied block; optional runtime-worker launcher |
 | `__shared__` | `vtcm_malloc()`/`vtcm_free()` pair | Hexagon tightly-coupled memory |
 | `__syncthreads()` | Implicit (comment) | SIMD lanes are lockstep |
 | `atomicAdd()` | *(no equivalent)* | Ripple has no atomics API and no documented alternative for this pattern |

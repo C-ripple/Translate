@@ -104,30 +104,47 @@ itself for now (leaving that loop sequential) rather than wait entirely.
 
 ## This translator's architecture (source-level path, `frontends/source/` + `core/`)
 
-`GlobalKernelRule` always adds `block_idx_x/y/z`, `grid_dim_x/y/z`, `block_dim_x/y/z` as
-real, declared parameters to every generated function — they are not undefined. Each
-generated function represents the work for a **single CUDA grid block**; multi-block
-grid iteration is left to an external, hand-written C driver loop the translator does
-not generate or see. This is a deliberate consequence of Ripple having no native
-multi-block construct (see above), not an oversight — but it's also not documented
-anywhere a user would see it today.
+`GlobalKernelRule` emits a per-block function taking a caller-supplied
+`ripple_block_t` and a translator-owned `ripple_launch_context_t`, followed by
+the original CUDA arguments. A generated `<kernel>_ripple_launch` iterates all
+grid dimensions sequentially on the target. `block_shape` is optional API input:
+positive static extents, or a mapping by kernel name. Explicit shapes are
+constructed in the launcher; omitted shapes produce a diagnostic and require
+the caller to pass a block constructed with the original CUDA launch shape.
+Shapes are never inferred from element types, HVX width, or index usage.
+See `docs/superpowers/specs/2026-10-08-preserve-block-shape-design.md`.
+
+Passing SIMD block objects requires caller and callee in the same compilation
+unit (upstream `ripple-spec/calling.md`). Optional `threaded=True` / `--threaded`
+also emits a worker launcher accepting an already running 1D
+`ripple_thd_block_t`. It queries dimension-zero worker IDs/sizes and
+distributes flattened grid blocks cyclically without changing SIMD shapes.
+The caller must create a 1D block; do not query higher dimensions without rank
+information (the opaque API has no rank query). The runtime owns initialization
+and completion. CUDA host launch syntax is
+rejected rather than translated.
+See `docs/superpowers/specs/2026-10-08-runtime-workers-design.md`.
 
 ## Deferred / known gaps (intentionally out of scope so far, not forgotten)
 
-- **~~Host-side~~ HTP-side grid-loop auto-generation — no longer deferred, Benoit gave
-  the signal on 2026-08-17.** Originally scoped out as "would let the translator emit
-  the outer per-block driver loop itself... no signal yet from Benoit's team that it's
-  actually blocking them." Benoit has now explicitly requested this, and redirected it
-  from a host-side loop to an HTP-side loop using the new `ripple_thd_*` API (to avoid
-  host↔HTP round-trip latency) — see the `ripple_thd_*` section above. This is a bigger
-  architectural change than the original host-loop idea would have been: it changes the
-  output contract (translator emits the block-iteration loop + thread-block setup
-  itself, using an API not yet in the release the translator otherwise targets) and its
-  correct shape depends on a currently-unreleased runtime. Needs a design spec
-  (`docs/superpowers/specs/`) before implementation, not a direct patch — open questions
-  include the loop-bound typo noted above, which of `ripple_thd_parallel`'s deferred
-  parts to stub vs. skip until QuRT/QHPI ship, and how `underlying`/`rt` (the runtime
-  object) gets threaded into a translator that currently emits self-contained kernels.
+- **Vendor runtime integration.** Worker launchers now ship and are verified with
+  real host pthreads, target simulator reference queries and actual SDK standalone
+  hardware threads. The latter bind queries to hardware IDs and prove secondary
+  thread execution using simulator statistics. Configure global HVX mode before
+  fork and acquire/release contexts per worker. SDK 19.0.07 release publishes
+  the context free before clearing old SSR permission; protect allocation and
+  release with an outer lock and use NO_WAIT acquisition to avoid deadlock.
+  Kernels execute outside that lock. Six-worker failures are retained.
+  QuRT/QHPI creation,
+  initialization and completion remain caller-owned and unverified because the
+  available SDK lacks runtime headers/libraries. Do not call reference queries
+  native concurrency proof.
+- **Floating-point compile mode.** On v68 use both `-mno-hvx-qfloat` and
+  `-mhvx-ieee-fp`. The installed compiler passes guarded tails and IEEE edge probes
+  in this mode. Default QFloat differs from exact IEEE values; disabling QFloat
+  alone fails guarded float tails even in handwritten Ripple. Preserve diagnostic
+  failures. Newer QFloat strict-ieee lowering runs only on v79+, so accepting
+  the flag is insufficient for v68. Do not loosen references to claim success.
 - **VS Code extension** (`interfaces/vscode/`) duplicates the source-level translation
   logic independently in TypeScript, rather than calling into the Python translator —
   tracked as GitHub issue #9, deliberately deferred as "a separate, bigger decision."

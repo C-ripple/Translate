@@ -292,28 +292,21 @@ class TestTranslationRuleEngine:
 # =============================================================================
 
 class TestBlockShapeInference:
-    """Tests for block shape inference."""
-    
-    def test_infer_1d_block(self):
-        source = "int idx = threadIdx.x;"
-        shape = infer_block_shape(source)
-        
-        assert shape.dimensionality() == 1
+    """The legacy entry point now validates shapes instead of guessing them."""
+
+    def test_explicit_1d_block(self):
+        shape = infer_block_shape("int idx = threadIdx.x;", launch_config=(64,))
+        assert shape.dimensions == [64, 1, 1]
         assert shape.pe_type == RIPPLEProcessingElement.HVX_PE
-    
-    def test_infer_2d_block(self):
-        source = "int row = threadIdx.y; int col = threadIdx.x;"
-        shape = infer_block_shape(source)
-        
-        assert shape.dimensionality() == 2
-    
-    def test_infer_from_float(self):
-        source = "float *data; threadIdx.x;"
-        ctx = TranslationContext()
-        shape = infer_block_shape(source, ctx=ctx)
-        
-        # 128 bytes / 4 bytes per float = 32 lanes
-        assert shape.dimensions[0] == 32
+
+    def test_explicit_2d_block(self):
+        shape = infer_block_shape("threadIdx.y; threadIdx.x;", launch_config=(16, 16))
+        assert shape.dimensions == [16, 16, 1]
+
+    def test_float_type_does_not_determine_shape(self):
+        from core.semantic_model import TranslationError
+        with pytest.raises(TranslationError, match="shape"):
+            infer_block_shape("float *data; threadIdx.x;")
 
 
 # =============================================================================

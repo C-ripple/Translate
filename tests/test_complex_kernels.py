@@ -41,7 +41,7 @@ class TestMatrixOperations:
         assert "ripple_id(ripple_block, 1)" in result
         assert "block_idx_x" in result
         assert "block_idx_y" in result
-        assert "RIPPLE_SETUP_BLOCK()" in result
+        assert "ripple_block_t ripple_block" in result
         assert "matmul_ripple" in result
     
     def test_tiled_matmul(self):

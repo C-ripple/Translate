@@ -311,6 +311,19 @@ HTML_TEMPLATE = '''
                     <option value="64">64 bytes</option>
                 </select>
             </div>
+            <div class="control-group">
+                <label for="block-shape">CUDA Block:</label>
+                <input id="block-shape" placeholder="e.g. 64 or 16,16"
+                       title="Optional static CUDA launch shape. Leave blank to pass a caller-created SIMD block."
+                       style="width: 140px">
+            </div>
+            <div class="control-group">
+                <label for="threaded">
+                    <input type="checkbox" id="threaded"
+                           title="Generate a worker launcher for a caller-initialized QuRT/QHPI runtime.">
+                    Runtime workers
+                </label>
+            </div>
             <button class="btn-primary" id="translate-btn">
                 <span class="spinner" id="spinner"></span>
                 Translate
@@ -401,6 +414,8 @@ __global__ void reduce_sum(float *input, float *output, int n) {
                 modeTabs.forEach(t => t.classList.remove('active'));
                 tab.classList.add('active');
                 currentMode = tab.dataset.mode;
+                document.getElementById('block-shape').disabled = currentMode !== 'source';
+                document.getElementById('threaded').disabled = currentMode !== 'source';
             });
         });
         
@@ -423,6 +438,15 @@ __global__ void reduce_sum(float *input, float *output, int n) {
             statusDot.className = 'status-dot';
             
             try {
+                const shapeText = document.getElementById('block-shape').value.trim();
+                let blockShape = null;
+                if (currentMode === 'source' && shapeText) {
+                    blockShape = shapeText.split(',').map(s => Number(s.trim()));
+                    if (blockShape.length > 3 ||
+                        !blockShape.every(n => Number.isSafeInteger(n) && n > 0)) {
+                        throw new Error('CUDA block shape needs one to three positive integers.');
+                    }
+                }
                 const response = await fetch('/translate', {
                     method: 'POST',
                     headers: {
@@ -432,7 +456,9 @@ __global__ void reduce_sum(float *input, float *output, int n) {
                         code: code,
                         mode: currentMode,
                         target: target,
-                        hvx_width: parseInt(hvxWidth)
+                        hvx_width: parseInt(hvxWidth),
+                        block_shape: blockShape,
+                        threaded: currentMode === 'source' && document.getElementById('threaded').checked
                     })
                 });
                 
@@ -461,7 +487,7 @@ __global__ void reduce_sum(float *input, float *output, int n) {
                 }
             } catch (error) {
                 rippleOutput.textContent = `Error: ${error.message}`;
-                statusText.textContent = 'Connection error';
+                statusText.textContent = error.message || 'Translation failed';
                 statusDot.classList.add('error');
             } finally {
                 spinner.classList.remove('active');
@@ -510,9 +536,12 @@ def translate():
         ctx = TranslationContext(target_platform=target)
         
         if mode == 'source':
-            transformer = CUDAToRIPPLETransformer(ctx)
+            transformer = CUDAToRIPPLETransformer(ctx, block_shape=data.get('block_shape'),
+                                                threaded=data.get('threaded', False))
             output = transformer.transform(code)
         else:
+            if data.get('block_shape') is not None or data.get('threaded', False):
+                raise ValueError('block_shape and threaded are supported only for source translation')
             translator = CUDAIRToRIPPLETranslator(ctx)
             output = translator.translate(code)
         

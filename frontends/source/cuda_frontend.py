@@ -478,8 +478,12 @@ class CUDAToRIPPLETransformer:
     This is the main entry point for source-level translation.
     """
     
-    def __init__(self, ctx: Optional[TranslationContext] = None):
+    def __init__(self, ctx: Optional[TranslationContext] = None, block_shape=None, threaded=False):
+        self.block_shape = block_shape
         self.ctx = ctx or TranslationContext(target_platform="hexagon")
+        if type(threaded) is not bool:
+            raise TranslationError(["threaded must be a boolean"])
+        self.ctx.generate_threaded_launchers = threaded
         self.rule_engine = TranslationRuleEngine()
         self.hexagon_config = HexagonConfig()
     
@@ -501,6 +505,7 @@ class CUDAToRIPPLETransformer:
         # not regex-scanning raw text) before the regex pass runs, and to
         # surface a warning instead of silently mistranslating when the
         # parser can't make sense of the source.
+        tokens = []
         try:
             lexer = CUDALexer(cuda_source)
             tokens = lexer.tokenize()
@@ -517,6 +522,26 @@ class CUDAToRIPPLETransformer:
         except Exception as e:
             self.ctx.add_warning(f"AST pre-pass failed with {type(e).__name__}, proceeding with regex-only translation: {e}")
 
+        # Launch information is an explicit input: kernel-only source cannot
+        # reveal it. In particular, a literal indexing stride is not a shape.
+        if any(t.type == TokenType.TRIPLE_CHEVRON_OPEN for t in tokens):
+            raise TranslationError([
+                "CUDA host launch syntax is not supported by the source frontend; "
+                "translate the kernel definitions and call the generated _ripple_launch wrapper."
+            ])
+        kernel_names = re.findall(r"__global__\s+void\s+(\w+)\s*\(", cuda_source)
+        self.ctx.kernel_block_shapes.clear()
+        self.ctx.launch_wrappers.clear()
+        if isinstance(self.block_shape, dict):
+            unknown = set(self.block_shape) - set(kernel_names)
+            if unknown:
+                raise TranslationError([f"Block shape supplied for unknown kernel: {name}" for name in sorted(unknown)])
+            shapes = self.block_shape
+        else:
+            shapes = {name: self.block_shape for name in kernel_names} if self.block_shape is not None else {}
+        for name, shape in shapes.items():
+            self.ctx.kernel_block_shapes[name] = infer_block_shape(cuda_source, launch_config=shape)
+
         # -- Regex Transformation (current translation path; AST does not drive codegen yet) --
         
         # Phase 1: Preprocess - extract structure
@@ -530,6 +555,9 @@ class CUDAToRIPPLETransformer:
         
         # Phase 4: Post-process and format
         result = self._postprocess(result)
+        if self.ctx.launch_wrappers:
+            # Format wrappers independently of the original source layout.
+            result += "\n\n" + self._postprocess("\n".join(self.ctx.launch_wrappers))
 
         if self.ctx.has_errors():
             raise TranslationError(self.ctx.errors)
@@ -559,8 +587,6 @@ class CUDAToRIPPLETransformer:
     
     def _add_ripple_boilerplate(self, source: str, original: str) -> str:
         """Add RIPPLE-specific boilerplate code."""
-        # Infer block shape from original CUDA code
-        block_shape = infer_block_shape(original, ctx=self.ctx)
         
         header = f"""/*
  * Auto-generated RIPPLE code from CUDA source
@@ -571,6 +597,11 @@ class CUDAToRIPPLETransformer:
  * enabled by default; omitting this flag produces undefined-symbol
  * errors for every ripple_* call in this file even though the code
  * below is valid RIPPLE C.
+ *
+ * v68 floating-point compatibility: compile with -mno-hvx-qfloat
+ * -mhvx-ieee-fp to use HVX IEEE arithmetic. Default QFloat can differ
+ * from CUDA float results; disabling QFloat alone is insufficient.
+ * Validate kernels and masked tails on the actual compiler/target.
  *
  * Translation warnings:
 """
@@ -598,18 +629,19 @@ class CUDAToRIPPLETransformer:
  * constant for it — every example in the Ripple docs self-defines its own
  * PE constant instead of relying on the header. Do the same. */
 #define HVX_PE 0
-#define RIPPLE_BLOCK_DIM_X {block_shape.dimensions[0]}
-#define RIPPLE_BLOCK_DIM_Y {block_shape.dimensions[1] if len(block_shape.dimensions) > 1 else 1}
-#define RIPPLE_BLOCK_DIM_Z {block_shape.dimensions[2] if len(block_shape.dimensions) > 2 else 1}
+/* Translator launch context (not part of the Ripple API). */
+#ifndef CUDA2RIPPLE_LAUNCH_TYPES
+#define CUDA2RIPPLE_LAUNCH_TYPES
+typedef struct {{ size_t x, y, z; }} ripple_dim3_t;
+typedef struct {{
+    ripple_dim3_t block_idx;
+    ripple_dim3_t grid_dim;
+}} ripple_launch_context_t;
+#endif
 
 """
-        
-        # Add helper macros
-        header += """
-/* RIPPLE block initialization */
-#define RIPPLE_SETUP_BLOCK() \\
-    ripple_block_t ripple_block = ripple_set_block_shape(HVX_PE, RIPPLE_BLOCK_DIM_X, RIPPLE_BLOCK_DIM_Y, RIPPLE_BLOCK_DIM_Z)
 
+        header += """
 /* Math intrinsics (translator-provided, not part of the Ripple API — no
  * real Ripple SAD primitive exists) */
 #define cripple_sad(x, y, z) (__builtin_abs((x) - (y)) + (z))
@@ -628,6 +660,19 @@ class CUDAToRIPPLETransformer:
             header += "\n".join(self.ctx.hoisted_declarations)
             header += "\n\n"
 
+        if self.ctx.generate_threaded_launchers:
+            header += """
+/* Requires the runtime's Ripple threading headers and library. */
+#include <ripple/thread.h>
+#ifndef CUDA2RIPPLE_LAUNCH_STATUS
+#define CUDA2RIPPLE_LAUNCH_STATUS
+enum {
+    CUDA2RIPPLE_LAUNCH_OK = 0,
+    CUDA2RIPPLE_BAD_WORKERS = 1,
+    CUDA2RIPPLE_BAD_GRID = 2
+};
+#endif
+"""
         return header + source
     
     def _postprocess(self, source: str) -> str:
@@ -936,23 +981,25 @@ class AIRBuilder:
 # Convenience Functions
 # =============================================================================
 
-def translate_cuda_source(cuda_source: str, target: str = "hexagon") -> str:
+def translate_cuda_source(cuda_source: str, target: str = "hexagon", block_shape=None, threaded=False) -> str:
     """
     Translate CUDA source code to RIPPLE.
     
     Args:
         cuda_source: CUDA source code string
         target: Target platform ("hexagon", "x86", "arm")
+        block_shape: Optional static extents or mapping of kernel names to extents.
+        threaded: Also generate a launcher distributing blocks across runtime workers.
     
     Returns:
         RIPPLE C source code string
     """
     ctx = TranslationContext(target_platform=target)
-    transformer = CUDAToRIPPLETransformer(ctx)
+    transformer = CUDAToRIPPLETransformer(ctx, block_shape=block_shape, threaded=threaded)
     return transformer.transform(cuda_source)
 
 
-def translate_cuda_file(input_path: str, output_path: str, target: str = "hexagon") -> str:
+def translate_cuda_file(input_path: str, output_path: str, target: str = "hexagon", block_shape=None, threaded=False) -> str:
     """
     Translate a CUDA source file to RIPPLE.
     
@@ -960,10 +1007,12 @@ def translate_cuda_file(input_path: str, output_path: str, target: str = "hexago
         input_path: Path to CUDA source file
         output_path: Path to write RIPPLE output
         target: Target platform
+        block_shape: Optional static extents or mapping of kernel names to extents.
+        threaded: Also generate a launcher distributing blocks across runtime workers.
     
     Returns:
         RIPPLE C source code string
     """
     ctx = TranslationContext(target_platform=target)
-    transformer = CUDAToRIPPLETransformer(ctx)
+    transformer = CUDAToRIPPLETransformer(ctx, block_shape=block_shape, threaded=threaded)
     return transformer.transform_file(input_path, output_path)

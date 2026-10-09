@@ -18,7 +18,7 @@ Key Mappings:
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 import re
 
 from .semantic_model import (
@@ -29,7 +29,7 @@ from .semantic_model import (
     CUDAWarpShuffle, CUDAReduction, CUDAAtomicOp,
     RIPPLEBlockShape, RIPPLEIndex, RIPPLEBroadcast, RIPPLEReduction,
     RIPPLEShuffle, RIPPLEParallelLoop, RIPPLEProcessingElement,
-    TranslationContext, HexagonConfig
+    TranslationContext, HexagonConfig, TranslationError
 )
 
 
@@ -129,9 +129,6 @@ class BlockIdxRule(TranslationRule):
         # This is handled at a higher level - the kernel restructuring
         def replace(match):
             component = match.group(1)
-            ctx.add_warning(
-                f"blockIdx.{component} requires kernel restructuring to outer loop"
-            )
             return f"block_idx_{component}"
         
         return re.sub(self.PATTERN, replace, cuda_code)
@@ -1791,17 +1788,100 @@ class GlobalKernelRule(TranslationRule):
             kernel_name = match.group(1)
             params = match.group(2).strip()
 
-            # Parse parameters to add grid/block dimensions. No trailing
-            # comma when the original kernel takes zero parameters (e.g.
-            # __global__ void foo()) — a bare comma before the closing
-            # paren is invalid C, which is exactly what shipped here
-            # until caught by tests/examples/ast_flat.cu's syntax check.
+            if params == "void":
+                params = ""
+            arguments = []
+            for parameter in params.split(",") if params else []:
+                name = re.search(r"([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*$", parameter)
+                if not name:
+                    ctx.add_error(f"{kernel_name}: cannot forward kernel parameter {parameter!r} to launch wrapper")
+                    return match.group(0)
+                arguments.append(name.group(1))
+            reserved = {
+                "ripple_block", "ripple_ctx", "ripple_grid", "ripple_worker_block",
+                "ripple_worker", "ripple_workers", "ripple_total", "ripple_task", "ripple_row"
+            } | {
+                f"{kind}_{axis}" for kind in ("block_idx", "grid_dim") for axis in "xyz"
+            }
+            if reserved.intersection(arguments):
+                ctx.add_error(f"{kernel_name}: parameter conflicts with generated launch context")
+                return match.group(0)
             param_suffix = f",\n    {params}" if params else ""
+            arg_suffix = ", " + ", ".join(arguments) if arguments else ""
+            shape = ctx.kernel_block_shapes.get(kernel_name)
+            if shape is None:
+                ctx.add_warning(
+                    f"{kernel_name}: CUDA launch shape is unknown; the caller must pass a "
+                    "ripple_block_t constructed with the original, statically known block shape "
+                    f"to {kernel_name}_ripple_launch. No shape is inferred from hardware width."
+                )
+                launch_prefix = "ripple_block_t ripple_block, "
+                setup = ""
+            else:
+                launch_prefix = ""
+                dimensions = ", ".join(str(d) for d in shape.dimensions)
+                setup = f"    ripple_block_t ripple_block = ripple_set_block_shape(HVX_PE, {dimensions});\n"
+
+            ctx.launch_wrappers.append(f"""/* Target-side launch: one call for every logical CUDA grid block.
+ * SIMD block objects must be passed within the same compilation unit. */
+void {kernel_name}_ripple_launch(
+    {launch_prefix}ripple_dim3_t ripple_grid{param_suffix}) {{
+{setup}    ripple_launch_context_t ripple_ctx = {{{{0, 0, 0}}, ripple_grid}};
+    for (ripple_ctx.block_idx.z = 0; ripple_ctx.block_idx.z < ripple_grid.z; ++ripple_ctx.block_idx.z) {{
+        for (ripple_ctx.block_idx.y = 0; ripple_ctx.block_idx.y < ripple_grid.y; ++ripple_ctx.block_idx.y) {{
+            for (ripple_ctx.block_idx.x = 0; ripple_ctx.block_idx.x < ripple_grid.x; ++ripple_ctx.block_idx.x) {{
+                {kernel_name}_ripple(ripple_block, ripple_ctx{arg_suffix});
+            }}
+        }}
+    }}
+}}
+""")
+            if ctx.generate_threaded_launchers:
+                ctx.launch_wrappers.append(f"""/* Invoke once from every worker in a one-dimensional runtime thread block.
+ * The runtime owns worker creation, runtime initialization and completion/join.
+ * Each worker owns disjoint logical CUDA blocks; SIMD shape stays unchanged. */
+int {kernel_name}_ripple_launch_workers(
+    {launch_prefix}ripple_thd_block_t ripple_worker_block,
+    ripple_dim3_t ripple_grid{param_suffix}) {{
+    if (!ripple_worker_block) return CUDA2RIPPLE_BAD_WORKERS;
+    size_t ripple_worker = ripple_thd_id(ripple_worker_block, 0);
+    size_t ripple_workers = ripple_thd_get_block_size(ripple_worker_block, 0);
+    /* Only dimension zero exists in the required 1D worker block.
+     * Do not query out-of-rank dimensions: the runtime API does not pad them. */
+    if (!ripple_workers || ripple_worker >= ripple_workers)
+        return CUDA2RIPPLE_BAD_WORKERS;
+    if (!ripple_grid.x || !ripple_grid.y || !ripple_grid.z)
+        return CUDA2RIPPLE_LAUNCH_OK;
+    uint64_t ripple_total = ripple_grid.x;
+    if (ripple_grid.y > UINT64_MAX / ripple_total) return CUDA2RIPPLE_BAD_GRID;
+    ripple_total *= ripple_grid.y;
+    if (ripple_grid.z > UINT64_MAX / ripple_total) return CUDA2RIPPLE_BAD_GRID;
+    ripple_total *= ripple_grid.z;
+{setup}    ripple_launch_context_t ripple_ctx = {{{{0, 0, 0}}, ripple_grid}};
+    uint64_t ripple_task = ripple_worker;
+    while (ripple_task < ripple_total) {{
+        uint64_t ripple_row = ripple_task / ripple_grid.x;
+        ripple_ctx.block_idx.x = ripple_task % ripple_grid.x;
+        ripple_ctx.block_idx.y = ripple_row % ripple_grid.y;
+        ripple_ctx.block_idx.z = ripple_row / ripple_grid.y;
+        {kernel_name}_ripple(ripple_block, ripple_ctx{arg_suffix});
+        /* Guard the addition, including when total approaches UINT64_MAX. */
+        if (ripple_total - ripple_task <= ripple_workers) break;
+        ripple_task += ripple_workers;
+    }}
+    return CUDA2RIPPLE_LAUNCH_OK;
+}}
+""")
+            # Keep builtin aliases local so rule-level builtin replacements remain
+            # independent of the function signature and launch implementation.
+            aliases = "\n".join(
+                f"    size_t {kind}_{axis} = ripple_ctx.{member}.{axis};"
+                for kind, member in (("block_idx", "block_idx"), ("grid_dim", "grid_dim"))
+                for axis in "xyz"
+            )
             return f"""void {kernel_name}_ripple(
-    int block_idx_x, int block_idx_y, int block_idx_z,
-    int grid_dim_x, int grid_dim_y, int grid_dim_z,
-    int block_dim_x, int block_dim_y, int block_dim_z{param_suffix}) {{
-    RIPPLE_SETUP_BLOCK();"""
+    ripple_block_t ripple_block, ripple_launch_context_t ripple_ctx{param_suffix}) {{
+{aliases}\n"""
 
         return re.sub(r'__global__\s+void\s+(\w+)\s*\(([^)]*)\)\s*\{', replace, cuda_code)
 
@@ -2043,56 +2123,26 @@ class TranslationRuleEngine:
 
 def infer_block_shape(
     cuda_code: str,
-    launch_config: Optional[CUDADim3] = None,
+    launch_config: Optional[Union[CUDADim3, tuple[int, ...], list[int]]] = None,
     ctx: TranslationContext = None
 ) -> RIPPLEBlockShape:
+    """Validate an explicit CUDA block shape, independently of SIMD width.
+
+    Kernel code cannot determine its launch shape. Unknown shapes must be
+    supplied by the caller rather than guessed from indexing or element types.
     """
-    Infer optimal RIPPLE block shape from CUDA code patterns.
-    
-    For Hexagon HVX:
-    - 128 bytes = 32 x int32 or 64 x int16 or 128 x int8
-    - Prefer 1D blocks for simple kernels
-    - Use 2D blocks for matrix operations
-    """
-    if ctx is None:
-        ctx = TranslationContext()
-    
-    # Analyze usage patterns
-    uses_2d = bool(re.search(r'threadIdx\.y|blockIdx\.y', cuda_code))
-    uses_3d = bool(re.search(r'threadIdx\.z|blockIdx\.z', cuda_code))
-    
-    # Detect element type from common patterns
-    if re.search(r'float\s*\*|float\s+\w+\[', cuda_code):
-        elem_type = "float"
-        hexagon_lanes = 32  # 128 bytes / 4 bytes
-    elif re.search(r'double\s*\*|double\s+\w+\[', cuda_code):
-        elem_type = "double"
-        hexagon_lanes = 16  # 128 bytes / 8 bytes
-    elif re.search(r'int16_t|short', cuda_code):
-        elem_type = "int16_t"
-        hexagon_lanes = 64  # 128 bytes / 2 bytes
-    elif re.search(r'int8_t|char', cuda_code):
-        elem_type = "int8_t"
-        hexagon_lanes = 128  # 128 bytes / 1 byte
+    if launch_config is None:
+        raise TranslationError(["CUDA block shape is unknown; supply an explicit static launch shape"])
+    if isinstance(launch_config, CUDADim3):
+        dims = [launch_config.x, launch_config.y, launch_config.z]
+    elif isinstance(launch_config, (tuple, list)):
+        dims = list(launch_config)
     else:
-        elem_type = "int32_t"
-        hexagon_lanes = 32  # Default: 128 bytes / 4 bytes
-    
-    # Determine dimensionality
-    if uses_3d:
-        dims = [hexagon_lanes, 1, 1]  # Flatten to 1D for Hexagon
-        ctx.add_warning("3D blocks flattened for Hexagon HVX")
-    elif uses_2d:
-        # For 2D, use square-ish dimensions
-        side = int(hexagon_lanes ** 0.5)
-        dims = [side, side]
-    else:
-        dims = [hexagon_lanes]
-    
-    return RIPPLEBlockShape(
-        pe_type=RIPPLEProcessingElement.HVX_PE,
-        dimensions=dims
-    )
+        raise TranslationError(["CUDA block shape must contain one to three positive integer extents"])
+    if not 1 <= len(dims) <= 3 or any(type(d) is not int or d <= 0 for d in dims):
+        raise TranslationError(["CUDA block shape must contain one to three positive compile-time integer extents"])
+    dims += [1] * (3 - len(dims))
+    return RIPPLEBlockShape(pe_type=RIPPLEProcessingElement.HVX_PE, dimensions=dims)
 
 
 # =============================================================================

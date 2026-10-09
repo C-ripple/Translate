@@ -441,8 +441,11 @@ class TranslationContext:
     target_platform: str = "hexagon"
     vector_width: int = 128  # Hexagon HVX default: 128 bytes = 1024 bits
     
-    # Block shape inference
-    inferred_block_shape: Optional[RIPPLEBlockShape] = None
+    # Explicit source-level launch shapes; never inferred from vector width.
+    inferred_block_shape: Optional[RIPPLEBlockShape] = None  # legacy IR metadata
+    kernel_block_shapes: dict[str, RIPPLEBlockShape] = field(default_factory=dict)
+    launch_wrappers: list[str] = field(default_factory=list)
+    generate_threaded_launchers: bool = False
     
     # Variable mappings
     thread_idx_mappings: dict[str, RIPPLEIndex] = field(default_factory=dict)

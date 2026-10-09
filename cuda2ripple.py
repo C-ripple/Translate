@@ -86,7 +86,9 @@ def translate(
     mode: str = "source",
     target: str = "hexagon",
     hvx_width: int = 128,
-    hvx_mode: str = "v68"
+    hvx_mode: str = "v68",
+    block_shape=None,
+    threaded: bool = False
 ) -> str:
     """
     Translate CUDA code to RIPPLE.
@@ -97,6 +99,9 @@ def translate(
         target: Target platform ("hexagon", "x86", "arm")
         hvx_width: Hexagon HVX vector width (64 or 128 bytes)
         hvx_mode: Hexagon instruction set version
+        block_shape: Static CUDA block extents or a mapping from kernel names to extents.
+            Omit to generate launchers that require a caller-supplied SIMD block.
+        threaded: Also generate a runtime-worker launcher (requires Ripple thread runtime).
     
     Returns:
         Translated RIPPLE code
@@ -117,9 +122,11 @@ def translate(
     )
     
     if mode == "source":
-        transformer = CUDAToRIPPLETransformer(ctx)
+        transformer = CUDAToRIPPLETransformer(ctx, block_shape=block_shape, threaded=threaded)
         return transformer.transform(code)
     elif mode == "ir":
+        if block_shape is not None or threaded:
+            raise ValueError("block_shape and threaded are supported only for source translation")
         translator = CUDAIRToRIPPLETranslator(ctx)
         return translator.translate(code)
     else:
